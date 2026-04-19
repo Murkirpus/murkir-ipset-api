@@ -1,0 +1,13 @@
+# /etc/sudoers.d/iptables-api
+# Установка: sudo visudo -f /etc/sudoers.d/iptables-api
+# Проверка путей: which ipset iptables ip6tables
+
+# Все пути на случай разных дистрибутивов
+Cmnd_Alias IPSET_CMDS = /usr/sbin/ipset, /sbin/ipset, /bin/ipset
+
+Cmnd_Alias IPT4_CMDS  = /sbin/iptables, /usr/sbin/iptables, /bin/iptables
+Cmnd_Alias IPT6_CMDS  = /sbin/ip6tables, /usr/sbin/ip6tables, /bin/ip6tables
+
+# Пользователь PHP-FPM/nginx: www-data, nginx, php и т.д.
+# Замени www-data на своего, если нужно.
+www-data ALL=(root) NOPASSWD: IPSET_CMDS, IPT4_CMDS, IPT6_CMDS
