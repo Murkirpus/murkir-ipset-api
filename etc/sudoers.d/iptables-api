@@ -1,5 +1,6 @@
 # /etc/sudoers.d/iptables-api
 # Установка: sudo visudo -f /etc/sudoers.d/iptables-api
+# sudo chmod 440 /etc/sudoers.d/iptables-api
 # Проверка путей: which ipset iptables ip6tables
 
 # Все пути на случай разных дистрибутивов
