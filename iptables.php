@@ -225,6 +225,358 @@ function getDebugInfo() {
     return array('status' => 'success', 'debug_info' => $d);
 }
 
+/**
+ * Диагностика окружения. Возвращает массив проверок со статусами:
+ *   'ok'    — всё в порядке
+ *   'warn'  — работает, но могут быть проблемы
+ *   'fail'  — критично, API не работает
+ */
+function runDiagnostics() {
+    $checks = array();
+
+    // --- 1. PHP и функции ---
+    $checks[] = array(
+        'name'   => 'Версия PHP',
+        'status' => version_compare(PHP_VERSION, '5.6.0', '>=') ? 'ok' : 'fail',
+        'value'  => PHP_VERSION,
+        'hint'   => 'Требуется PHP 5.6 или новее',
+    );
+
+    // exec()
+    $exec_disabled = false;
+    $disabled = explode(',', str_replace(' ', '', (string)ini_get('disable_functions')));
+    if (in_array('exec', $disabled, true) || !function_exists('exec')) {
+        $exec_disabled = true;
+    }
+    $checks[] = array(
+        'name'   => 'Функция exec()',
+        'status' => $exec_disabled ? 'fail' : 'ok',
+        'value'  => $exec_disabled ? 'ОТКЛЮЧЕНА' : 'доступна',
+        'hint'   => $exec_disabled
+            ? 'Удали "exec" из disable_functions в php.ini. Без exec() скрипт работать не может.'
+            : '',
+    );
+
+    // escapeshellarg
+    $checks[] = array(
+        'name'   => 'Функция escapeshellarg()',
+        'status' => function_exists('escapeshellarg') ? 'ok' : 'fail',
+        'value'  => function_exists('escapeshellarg') ? 'доступна' : 'отсутствует',
+        'hint'   => 'Нужна для защиты от shell-injection',
+    );
+
+    // filter_var
+    $checks[] = array(
+        'name'   => 'Функция filter_var()',
+        'status' => function_exists('filter_var') ? 'ok' : 'fail',
+        'value'  => function_exists('filter_var') ? 'доступна' : 'отсутствует',
+        'hint'   => 'Установи пакет php-filter',
+    );
+
+    // hash_equals
+    $checks[] = array(
+        'name'   => 'Функция hash_equals()',
+        'status' => function_exists('hash_equals') ? 'ok' : 'warn',
+        'value'  => function_exists('hash_equals') ? 'доступна' : 'отсутствует',
+        'hint'   => function_exists('hash_equals') ? '' : 'Без hash_equals сравнение API-ключа уязвимо к timing-атакам',
+    );
+
+    // Если exec нет — дальше не проверяем, бесполезно
+    if ($exec_disabled) {
+        return array('status' => 'fail', 'checks' => $checks);
+    }
+
+    // Вспомогательная функция поиска бинарника без shell_exec
+    // (shell_exec часто отключен в disable_functions на production-серверах)
+    $find_binary = function($name) {
+        // 1. Пробуем через exec + command -v
+        $out = array(); $rc = 0;
+        @exec("command -v " . escapeshellarg($name) . " 2>/dev/null", $out, $rc);
+        if ($rc === 0 && !empty($out[0])) {
+            return trim($out[0]);
+        }
+        // 2. Фоллбек: проверяем стандартные пути
+        foreach (array('/usr/sbin', '/sbin', '/usr/bin', '/bin', '/usr/local/sbin', '/usr/local/bin') as $dir) {
+            if (is_executable("$dir/$name")) return "$dir/$name";
+        }
+        return '';
+    };
+
+    // --- 2. Бинарники в системе ---
+    $bins = array('sudo', 'ipset', 'iptables', 'ip6tables');
+    foreach ($bins as $bin) {
+        $path = $find_binary($bin);
+        $hint = '';
+        if (!$path) {
+            if ($bin === 'ipset') {
+                $hint = 'sudo apt install ipset   (или: yum install ipset)';
+            } elseif ($bin === 'sudo') {
+                $hint = 'sudo не установлен. Переустанови coreutils/sudo пакет.';
+            } else {
+                $hint = "sudo apt install $bin";
+            }
+        }
+        $checks[] = array(
+            'name'   => "Бинарник $bin",
+            'status' => $path ? 'ok' : 'fail',
+            'value'  => $path ? $path : 'не найден',
+            'hint'   => $hint,
+        );
+    }
+
+    // --- 3. Модуль ядра xt_set ---
+    $xt_loaded = false;
+    if (is_readable('/proc/modules')) {
+        $modules = @file_get_contents('/proc/modules');
+        if ($modules && (strpos($modules, 'xt_set') !== false || strpos($modules, 'ip_set') !== false)) {
+            $xt_loaded = true;
+        }
+    }
+    // Альтернативный способ: modinfo
+    if (!$xt_loaded) {
+        $out = array();
+        exec('lsmod 2>/dev/null | grep -E "^(xt_set|ip_set)" 2>/dev/null', $out);
+        if (!empty($out)) $xt_loaded = true;
+    }
+    $checks[] = array(
+        'name'   => 'Модуль ядра xt_set',
+        'status' => $xt_loaded ? 'ok' : 'warn',
+        'value'  => $xt_loaded ? 'загружен' : 'не обнаружен (или /proc/modules недоступен)',
+        'hint'   => $xt_loaded ? '' : 'Загрузится автоматически при первом использовании ipset. Принудительно: sudo modprobe xt_set',
+    );
+
+    // --- 4. Проверка sudoers (sudo без пароля) ---
+    // sudo -n = non-interactive, не запрашивать пароль. Код возврата 0 = можно выполнять.
+    $sudo_path = $find_binary('sudo');
+
+    if (!$sudo_path) {
+        // Если sudo не установлен — пропускаем sudoers-проверки
+        $checks[] = array(
+            'name'   => 'sudoers',
+            'status' => 'fail',
+            'value'  => 'пропущено (sudo не установлен)',
+            'hint'   => 'Сначала установи sudo',
+        );
+    } else {
+        // Определяем реального пользователя PHP (для шаблона sudoers)
+        $real_user = 'www-data';
+        if (function_exists('posix_getpwuid') && function_exists('posix_geteuid')) {
+            $info = @posix_getpwuid(posix_geteuid());
+            if ($info) $real_user = $info['name'];
+        } elseif (function_exists('get_current_user')) {
+            $u = get_current_user();
+            if ($u) $real_user = $u;
+        }
+
+        $sudo_tests = array(
+            array('cmd' => 'sudo -n ipset list -name 2>&1',      'name' => 'sudoers: ipset'),
+            array('cmd' => 'sudo -n iptables -L INPUT -n 2>&1',  'name' => 'sudoers: iptables'),
+            array('cmd' => 'sudo -n ip6tables -L INPUT -n 2>&1', 'name' => 'sudoers: ip6tables'),
+        );
+        $sudoers_hint = "Создай /etc/sudoers.d/iptables-api:\n" .
+            "  Cmnd_Alias IPSET_CMDS = /usr/sbin/ipset, /sbin/ipset, /bin/ipset\n" .
+            "  Cmnd_Alias IPT4_CMDS  = /sbin/iptables, /usr/sbin/iptables\n" .
+            "  Cmnd_Alias IPT6_CMDS  = /sbin/ip6tables, /usr/sbin/ip6tables\n" .
+            "  " . $real_user . " ALL=(root) NOPASSWD: IPSET_CMDS, IPT4_CMDS, IPT6_CMDS\n" .
+            "Затем: sudo chmod 440 /etc/sudoers.d/iptables-api && sudo visudo -cf /etc/sudoers.d/iptables-api";
+
+        foreach ($sudo_tests as $t) {
+            $out = array(); $rc = 0;
+            exec($t['cmd'], $out, $rc);
+            $outStr = implode(' ', $out);
+            // Удаляем control chars, которые ломают JSON
+            $outStr = preg_replace('/[\x00-\x08\x0b\x0c\x0e-\x1f]/', '', $outStr);
+
+            $status = 'ok';
+            $value  = 'работает';
+            $hint   = '';
+
+            if ($rc !== 0) {
+                $status = 'fail';
+                if (stripos($outStr, 'password is required') !== false ||
+                    stripos($outStr, 'a password is required') !== false ||
+                    stripos($outStr, 'askpass') !== false) {
+                    $value = 'требует пароль';
+                    $hint  = 'sudoers не настроен для NOPASSWD. ' . $sudoers_hint;
+                } elseif (stripos($outStr, 'not allowed') !== false ||
+                          stripos($outStr, 'not in the sudoers') !== false) {
+                    $value = 'не разрешено';
+                    $hint  = 'Пользователь ' . $real_user . ' не в sudoers. ' . $sudoers_hint;
+                } elseif (stripos($outStr, 'command not found') !== false ||
+                          stripos($outStr, 'not found') !== false) {
+                    $value = 'команда не найдена';
+                    $hint  = 'Бинарник отсутствует. Проверь предыдущие шаги.';
+                } else {
+                    $value = 'ошибка (rc=' . $rc . ')';
+                    $hint  = (trim($outStr) ? 'Вывод: ' . trim($outStr) . "\n" : '') . $sudoers_hint;
+                }
+            }
+            $checks[] = array(
+                'name'   => $t['name'],
+                'status' => $status,
+                'value'  => $value,
+                'hint'   => $hint,
+            );
+        }
+    }
+
+    // --- 5. Текущий пользователь PHP ---
+    $user = 'unknown';
+    if (function_exists('posix_getpwuid') && function_exists('posix_geteuid')) {
+        $info = @posix_getpwuid(posix_geteuid());
+        if ($info) $user = $info['name'];
+    }
+    if ($user === 'unknown') $user = get_current_user() ?: 'unknown';
+    $checks[] = array(
+        'name'   => 'Пользователь PHP',
+        'status' => 'ok',
+        'value'  => $user,
+        'hint'   => 'Именно этот пользователь должен быть в /etc/sudoers.d/iptables-api',
+    );
+
+    // --- 6. Состояние сетов ipset ---
+    exec("sudo -n ipset list " . IPSET_V4 . " -name 2>/dev/null", $o4, $rc4);
+    $checks[] = array(
+        'name'   => 'ipset: ' . IPSET_V4,
+        'status' => ($rc4 === 0) ? 'ok' : 'warn',
+        'value'  => ($rc4 === 0) ? 'существует' : 'не создан',
+        'hint'   => ($rc4 === 0) ? '' : 'Будет создан автоматически при первой блокировке IPv4',
+    );
+
+    exec("sudo -n ipset list " . IPSET_V6 . " -name 2>/dev/null", $o6, $rc6);
+    $checks[] = array(
+        'name'   => 'ipset: ' . IPSET_V6,
+        'status' => ($rc6 === 0) ? 'ok' : 'warn',
+        'value'  => ($rc6 === 0) ? 'существует' : 'не создан',
+        'hint'   => ($rc6 === 0) ? '' : 'Будет создан автоматически при первой блокировке IPv6',
+    );
+
+    // --- 7. Правила INPUT ---
+    exec("sudo -n iptables -C INPUT -m set --match-set " . IPSET_V4 . " src -j DROP 2>/dev/null", $o, $rci4);
+    $checks[] = array(
+        'name'   => 'Правило iptables INPUT',
+        'status' => ($rci4 === 0) ? 'ok' : 'warn',
+        'value'  => ($rci4 === 0) ? 'установлено' : 'отсутствует',
+        'hint'   => ($rci4 === 0) ? '' : 'Будет создано автоматически при первой блокировке',
+    );
+
+    exec("sudo -n ip6tables -C INPUT -m set --match-set " . IPSET_V6 . " src -j DROP 2>/dev/null", $o, $rci6);
+    $checks[] = array(
+        'name'   => 'Правило ip6tables INPUT',
+        'status' => ($rci6 === 0) ? 'ok' : 'warn',
+        'value'  => ($rci6 === 0) ? 'установлено' : 'отсутствует',
+        'hint'   => ($rci6 === 0) ? '' : 'Будет создано автоматически при первой блокировке',
+    );
+
+    // --- 8. Права на запись в /tmp (для логов PHP) ---
+    $tmp_writable = is_writable(sys_get_temp_dir());
+    $checks[] = array(
+        'name'   => 'Запись в ' . sys_get_temp_dir(),
+        'status' => $tmp_writable ? 'ok' : 'warn',
+        'value'  => $tmp_writable ? 'доступна' : 'запрещена',
+        'hint'   => $tmp_writable ? '' : 'Может не работать логирование ошибок PHP',
+    );
+
+    // --- Итоговый статус ---
+    $has_fail = false;
+    $has_warn = false;
+    foreach ($checks as $c) {
+        if ($c['status'] === 'fail') $has_fail = true;
+        if ($c['status'] === 'warn') $has_warn = true;
+    }
+
+    $overall = 'ok';
+    if ($has_fail)      $overall = 'fail';
+    elseif ($has_warn)  $overall = 'warn';
+
+    // Есть ли незавершённая инициализация (можно запустить init)?
+    $can_init = !$has_fail && $has_warn;
+
+    return array(
+        'status'   => $overall,
+        'can_init' => $can_init,
+        'summary'  => ($overall === 'ok')
+            ? 'Все проверки пройдены. Система готова к работе.'
+            : (($overall === 'warn')
+                ? 'Есть предупреждения. Нажми «Инициализировать» чтобы создать сеты и правила.'
+                : 'Критические ошибки — API работать не будет. Смотри подсказки ниже.'),
+        'checks'   => $checks,
+    );
+}
+
+/**
+ * Принудительная инициализация: создаёт сеты и правила сейчас,
+ * а не лениво при первом запросе. Возвращает подробный лог.
+ */
+function initSystem() {
+    $log = array();
+    $success = true;
+
+    // IPv4 сет
+    exec("sudo ipset list " . IPSET_V4 . " -name 2>&1", $o, $rc);
+    if ($rc !== 0) {
+        exec(sprintf("sudo ipset create %s hash:ip timeout %d maxelem %d 2>&1",
+            IPSET_V4, BAN_TIMEOUT, IPSET_MAXELEM), $o2, $rc2);
+        if ($rc2 === 0) {
+            $log[] = '✅ Создан сет ' . IPSET_V4;
+        } else {
+            $log[] = '❌ Не удалось создать ' . IPSET_V4 . ': ' . implode(' ', $o2);
+            $success = false;
+        }
+    } else {
+        $log[] = '✓ ' . IPSET_V4 . ' уже существует';
+    }
+
+    // IPv6 сет
+    exec("sudo ipset list " . IPSET_V6 . " -name 2>&1", $o, $rc);
+    if ($rc !== 0) {
+        exec(sprintf("sudo ipset create %s hash:ip family inet6 timeout %d maxelem %d 2>&1",
+            IPSET_V6, BAN_TIMEOUT, IPSET_MAXELEM), $o2, $rc2);
+        if ($rc2 === 0) {
+            $log[] = '✅ Создан сет ' . IPSET_V6;
+        } else {
+            $log[] = '❌ Не удалось создать ' . IPSET_V6 . ': ' . implode(' ', $o2);
+            $success = false;
+        }
+    } else {
+        $log[] = '✓ ' . IPSET_V6 . ' уже существует';
+    }
+
+    // iptables правило
+    exec("sudo iptables -C INPUT -m set --match-set " . IPSET_V4 . " src -j DROP 2>/dev/null", $o, $rc);
+    if ($rc !== 0) {
+        exec("sudo iptables -I INPUT -m set --match-set " . IPSET_V4 . " src -j DROP 2>&1", $o2, $rc2);
+        if ($rc2 === 0) {
+            $log[] = '✅ Создано правило iptables INPUT';
+        } else {
+            $log[] = '❌ Не удалось создать правило iptables: ' . implode(' ', $o2);
+            $success = false;
+        }
+    } else {
+        $log[] = '✓ Правило iptables INPUT уже существует';
+    }
+
+    // ip6tables правило
+    exec("sudo ip6tables -C INPUT -m set --match-set " . IPSET_V6 . " src -j DROP 2>/dev/null", $o, $rc);
+    if ($rc !== 0) {
+        exec("sudo ip6tables -I INPUT -m set --match-set " . IPSET_V6 . " src -j DROP 2>&1", $o2, $rc2);
+        if ($rc2 === 0) {
+            $log[] = '✅ Создано правило ip6tables INPUT';
+        } else {
+            $log[] = '❌ Не удалось создать правило ip6tables: ' . implode(' ', $o2);
+            $success = false;
+        }
+    } else {
+        $log[] = '✓ Правило ip6tables INPUT уже существует';
+    }
+
+    return array(
+        'status'  => $success ? 'success' : 'error',
+        'message' => $success ? 'Инициализация завершена' : 'Инициализация с ошибками',
+        'details' => implode("\n", $log),
+    );
+}
+
 // --- Роутинг ---
 
 $action  = isset($_REQUEST['action'])  ? $_REQUEST['action']  : '';
@@ -239,6 +591,8 @@ switch ($action) {
     case 'list6':   $result = listBlockedIPs(6); break;
     case 'clear':   $result = clearAllRules();   break;
     case 'debug':   $result = getDebugInfo();    break;
+    case 'diag':    $result = runDiagnostics();  break;
+    case 'init':    $result = initSystem();      break;
 }
 
 // --- API-режим: JSON и выход ---
@@ -328,6 +682,29 @@ header('Cache-Control: no-store');
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white; padding: 20px; border-radius: 12px; text-align: center;
         }
+        .diag-item {
+            display: flex; align-items: flex-start; gap: 12px;
+            padding: 12px 16px; border-radius: 8px; margin-bottom: 8px;
+            background: #f5f5f5; border-left: 4px solid #ccc;
+        }
+        .diag-item.ok   { background: #e8f5e9; border-left-color: #4caf50; }
+        .diag-item.warn { background: #fff3e0; border-left-color: #ff9800; }
+        .diag-item.fail { background: #ffebee; border-left-color: #f44336; }
+        .diag-icon { font-size: 20px; min-width: 24px; }
+        .diag-body { flex: 1; min-width: 0; }
+        .diag-name { font-weight: 600; color: #333; }
+        .diag-value { color: #666; font-size: 14px; margin-top: 2px; font-family: monospace; }
+        .diag-hint {
+            margin-top: 6px; padding: 8px 10px; background: rgba(0,0,0,0.04);
+            border-radius: 4px; font-size: 13px; white-space: pre-wrap; word-break: break-word;
+            color: #444; font-family: monospace;
+        }
+        .diag-summary {
+            padding: 20px; border-radius: 12px; margin-bottom: 20px; font-size: 18px; font-weight: 500;
+        }
+        .diag-summary.ok   { background: #e8f5e9; color: #2e7d32; }
+        .diag-summary.warn { background: #fff3e0; color: #e65100; }
+        .diag-summary.fail { background: #ffebee; color: #c62828; }
         .stat-card h3 { font-size: 36px; margin-bottom: 10px; }
         .stat-card p  { font-size: 14px; opacity: 0.9; }
         .button-group { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
@@ -360,6 +737,7 @@ header('Cache-Control: no-store');
             <button class="tab active" onclick="switchTab('block')">Блокировка</button>
             <button class="tab" onclick="switchTab('list')">Список IP</button>
             <button class="tab" onclick="switchTab('stats')">Статистика</button>
+            <button class="tab" onclick="switchTab('diag')">🔍 Диагностика</button>
         </div>
 
         <div id="block-tab" class="tab-content active">
@@ -421,6 +799,16 @@ header('Cache-Control: no-store');
                 <button id="btn-refresh-stats" onclick="updateStats()" class="btn btn-primary">🔄 Обновить</button>
             </div>
         </div>
+
+        <div id="diag-tab" class="tab-content">
+            <h2>Диагностика системы</h2>
+            <p style="color: #666; margin-bottom: 20px;">Проверка всех компонентов, необходимых для работы API</p>
+            <div id="diag-summary"></div>
+            <div id="diag-list">Загрузка...</div>
+            <div style="margin-top: 20px;">
+                <button id="btn-refresh-diag" onclick="runDiag()" class="btn btn-primary">🔄 Перепроверить</button>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -435,6 +823,106 @@ header('Cache-Control: no-store');
             document.getElementById(tabName + '-tab').classList.add('active');
             if (tabName === 'list')  refreshLists();
             if (tabName === 'stats') updateStats();
+            if (tabName === 'diag')  runDiag();
+        }
+
+        function escapeHtml(s) {
+            if (s === null || s === undefined) return '';
+            return String(s).replace(/[&<>"']/g, function(c) {
+                return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+            });
+        }
+
+        function runDiag() {
+            var btn = document.getElementById('btn-refresh-diag');
+            if (btn) { btn.disabled = true; setTimeout(function() { btn.disabled = false; }, 1500); }
+
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '?action=diag&api=1&api_key=' + encodeURIComponent(apiKey) + '&_t=' + Date.now(), true);
+            xhr.onload = function() {
+                if (xhr.status === 200) {
+                    try {
+                        var data = JSON.parse(xhr.responseText);
+                        renderDiag(data);
+                    } catch (e) {
+                        document.getElementById('diag-list').innerHTML =
+                            '<p style="color: #f44336;">Ошибка парсинга ответа: ' + escapeHtml(e.message) + '</p>';
+                    }
+                } else {
+                    document.getElementById('diag-list').innerHTML =
+                        '<p style="color: #f44336;">HTTP ' + xhr.status + '</p>';
+                }
+            };
+            xhr.send();
+        }
+
+        function renderDiag(data) {
+            var icons = {ok: '✅', warn: '⚠️', fail: '❌'};
+            var summaryEl = document.getElementById('diag-summary');
+            summaryEl.className = 'diag-summary ' + data.status;
+
+            var summaryHtml = icons[data.status] + ' ' + escapeHtml(data.summary);
+
+            // Кнопка принудительной инициализации, если можно
+            if (data.can_init) {
+                summaryHtml += '<div style="margin-top: 12px;">' +
+                    '<button onclick="initSystem()" class="btn btn-primary" id="btn-init">⚡ Инициализировать сеты и правила</button>' +
+                    '</div>';
+            }
+            summaryEl.innerHTML = summaryHtml;
+
+            var html = '';
+            for (var i = 0; i < data.checks.length; i++) {
+                var c = data.checks[i];
+                html += '<div class="diag-item ' + c.status + '">' +
+                    '<div class="diag-icon">' + icons[c.status] + '</div>' +
+                    '<div class="diag-body">' +
+                        '<div class="diag-name">' + escapeHtml(c.name) + '</div>' +
+                        '<div class="diag-value">' + escapeHtml(c.value) + '</div>' +
+                        (c.hint ? '<div class="diag-hint">💡 ' + escapeHtml(c.hint) + '</div>' : '') +
+                    '</div>' +
+                '</div>';
+            }
+            document.getElementById('diag-list').innerHTML = html;
+        }
+
+        function initSystem() {
+            var btn = document.getElementById('btn-init');
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Инициализация...'; }
+
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '?action=init&api=1&api_key=' + encodeURIComponent(apiKey) + '&_t=' + Date.now(), true);
+            xhr.onload = function() {
+                try {
+                    var data = JSON.parse(xhr.responseText);
+                    alert((data.status === 'success' ? '✅ ' : '❌ ') + data.message + '\n\n' + data.details);
+                } catch (e) {
+                    alert('Ошибка: ' + xhr.responseText);
+                }
+                runDiag(); // Перечитываем диагностику
+            };
+            xhr.onerror = function() {
+                alert('Сетевая ошибка');
+                if (btn) { btn.disabled = false; btn.textContent = '⚡ Инициализировать сеты и правила'; }
+            };
+            xhr.send();
+        }
+
+        // Автоматическая фоновая проверка при загрузке — если fail, переключаемся на диагностику
+        function autoHealthCheck() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '?action=diag&api=1&api_key=' + encodeURIComponent(apiKey) + '&_t=' + Date.now(), true);
+            xhr.onload = function() {
+                if (xhr.status === 200) {
+                    try {
+                        var data = JSON.parse(xhr.responseText);
+                        if (data.status === 'fail') {
+                            switchTab('diag');
+                        }
+                    } catch (e) {}
+                }
+            };
+            xhr.send();
         }
 
         function loadIPs(version, callback) {
@@ -514,6 +1002,8 @@ header('Cache-Control: no-store');
         document.addEventListener('DOMContentLoaded', function() {
             <?php if ($action === 'unblock' || $action === 'clear'): ?>
                 switchTab('list');
+            <?php else: ?>
+                autoHealthCheck();
             <?php endif; ?>
         });
     </script>
