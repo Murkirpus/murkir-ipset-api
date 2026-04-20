@@ -1178,5 +1178,3 @@ MIT
 ## Поддержка
 
 - 🐛 Баги, предложения — в [Issues](https://github.com/Murkirpus/murkir-ipset-api/issues)
-- 💬 Вопросы — в [Discussions](https://github.com/Murkirpus/murkir-ipset-api/discussions)
-- 🔀 Pull Request-ы приветствуются
