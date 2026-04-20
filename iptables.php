@@ -64,6 +64,64 @@ function ipVersion($ip) {
     return 0;
 }
 
+/**
+ * Проверяет, входит ли IP в подсеть CIDR.
+ * Поддерживает IPv4 и IPv6. Возвращает true/false.
+ */
+function ipInCidr($ip, $cidr) {
+    // Одиночный IP без маски — прямое сравнение
+    if (strpos($cidr, '/') === false) {
+        // Нормализуем IPv6 к бинарному виду для корректного сравнения
+        $a = @inet_pton($ip);
+        $b = @inet_pton($cidr);
+        return ($a !== false && $b !== false && $a === $b);
+    }
+
+    list($subnet, $mask) = explode('/', $cidr, 2);
+    $mask = (int)$mask;
+
+    $ip_bin     = @inet_pton($ip);
+    $subnet_bin = @inet_pton($subnet);
+    if ($ip_bin === false || $subnet_bin === false) return false;
+
+    // Длины должны совпадать (обе IPv4 = 4 байта, обе IPv6 = 16 байт)
+    if (strlen($ip_bin) !== strlen($subnet_bin)) return false;
+
+    $max_bits = strlen($ip_bin) * 8;
+    if ($mask < 0 || $mask > $max_bits) return false;
+
+    // Собираем бинарную маску
+    $full_bytes = (int)($mask / 8);
+    $remainder  = $mask % 8;
+    $mask_bin   = str_repeat("\xff", $full_bytes);
+    if ($remainder > 0) {
+        $mask_bin .= chr(0xff << (8 - $remainder) & 0xff);
+    }
+    $mask_bin = str_pad($mask_bin, strlen($ip_bin), "\x00");
+
+    return ($ip_bin & $mask_bin) === ($subnet_bin & $mask_bin);
+}
+
+/**
+ * Проверяет, находится ли IP в whitelist из settings.php.
+ * Loopback (127.0.0.0/8 и ::1) всегда в whitelist.
+ */
+function isWhitelisted($ip) {
+    global $IP_WHITELIST;
+
+    // Дефолтный whitelist — loopback всегда защищён
+    $defaults = array('127.0.0.0/8', '::1');
+
+    $list = is_array($IP_WHITELIST) ? array_merge($defaults, $IP_WHITELIST) : $defaults;
+
+    foreach ($list as $entry) {
+        $entry = trim($entry);
+        if ($entry === '') continue;
+        if (ipInCidr($ip, $entry)) return $entry;
+    }
+    return false;
+}
+
 function formatDuration($s) {
     $s = (int)$s;
     if ($s <= 0) return '—';
@@ -107,6 +165,16 @@ function ensureSetsReady() {
 function blockIP($ip, $timeout = 0) {
     $v = ipVersion($ip);
     if (!$v) return array('status' => 'error', 'message' => "Неверный формат IP: $ip");
+
+    // Защита от самострела — whitelist из settings.php
+    $matched = isWhitelisted($ip);
+    if ($matched !== false) {
+        return array(
+            'status'  => 'warning',
+            'message' => "IP $ip в белом списке — блокировка отклонена",
+            'details' => "Совпадение с правилом: $matched",
+        );
+    }
 
     $timeout = ($timeout > 0) ? (int)$timeout : BAN_TIMEOUT;
     ensureSetsReady();
@@ -466,6 +534,28 @@ function runDiagnostics() {
         'status' => ($rci6 === 0) ? 'ok' : 'warn',
         'value'  => ($rci6 === 0) ? 'установлено' : 'отсутствует',
         'hint'   => ($rci6 === 0) ? '' : 'Будет создано автоматически при первой блокировке',
+    );
+
+    // --- 7.5. Whitelist ---
+    global $IP_WHITELIST;
+    $wl_user = is_array($IP_WHITELIST) ? count($IP_WHITELIST) : 0;
+    $wl_total = $wl_user + 2; // +loopback v4 и v6
+    $wl_invalid = array();
+    if (is_array($IP_WHITELIST)) {
+        foreach ($IP_WHITELIST as $entry) {
+            $entry = trim($entry);
+            if ($entry === '') continue;
+            $check_ip = (strpos($entry, '/') !== false) ? explode('/', $entry)[0] : $entry;
+            if (!ipVersion($check_ip)) $wl_invalid[] = $entry;
+        }
+    }
+    $checks[] = array(
+        'name'   => 'Белый список (whitelist)',
+        'status' => empty($wl_invalid) ? 'ok' : 'warn',
+        'value'  => "$wl_total записей (" . $wl_user . " из settings.php + 2 loopback)",
+        'hint'   => empty($wl_invalid)
+            ? 'IP из белого списка не будут блокироваться. Редактируется в settings.php (массив $IP_WHITELIST)'
+            : 'Некорректные записи: ' . implode(', ', $wl_invalid) . '. Проверь формат в settings.php',
     );
 
     // --- 8. Права на запись в /tmp (для логов PHP) ---
