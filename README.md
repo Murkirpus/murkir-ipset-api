@@ -1,3 +1,4 @@
+<img src="./murkir-ipset-api.png" alt="Демонстрация" width="800">
 # murkir-ipset-api
 
 **PHP API и веб-интерфейс для блокировки IPv4/IPv6 через `ipset`** с авто-разбаном на уровне ядра Linux. Один файл, без cron, без cleanup-скриптов, без composer.
