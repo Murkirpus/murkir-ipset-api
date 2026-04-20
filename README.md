@@ -239,6 +239,163 @@ cd tests/
 ./run.sh
 ```
 
+## Требования
+
+Минимальный набор для работы `iptables.php`. Все проверки автоматизированы на вкладке **🔍 Диагностика** — при первом открытии UI она покажет что не так и как исправить.
+
+### Операционная система
+
+- **Linux** с ядром 3.13+ (Ubuntu 14.04+, Debian 8+, CentOS 7+, RHEL 7+, Alpine 3.x)
+- Поддержка netfilter в ядре — есть по умолчанию во всех дистрибутивах
+- Модуль ядра `xt_set` — загружается автоматически при первом использовании `ipset`, или вручную: `sudo modprobe xt_set`
+
+Не подходит: shared-хостинги без доступа к `sudo` и iptables, контейнеры без `CAP_NET_ADMIN`, Windows.
+
+### Пакеты
+
+```bash
+# Ubuntu / Debian
+sudo apt install ipset iptables sudo
+
+# CentOS / RHEL / AlmaLinux / Rocky
+sudo yum install ipset iptables sudo
+
+# Alpine
+apk add ipset iptables sudo
+```
+
+`iptables` и `ip6tables` обычно уже установлены в системе.
+
+### PHP
+
+- **Версия: 5.6 или новее** (протестировано на 5.6, 7.0–7.4, 8.0–8.3)
+- **Расширения** — все стандартные, отдельно ставить ничего не нужно:
+  - `ext/filter` (проверка IP через `filter_var`)
+  - `ext/hash` (timing-safe сравнение ключа через `hash_equals`)
+  - `ext/json` (кодирование ответов API)
+  - `ext/posix` — опционально, для определения реального пользователя PHP в диагностике
+
+### Функции PHP, которые должны быть доступны
+
+Проверь `php.ini` → директиву `disable_functions`. Эти функции **не должны** быть в списке:
+
+| Функция | Зачем нужна | Критично? |
+|---|---|---|
+| `exec` | Выполнение команд `ipset`/`iptables` | ❌ без неё скрипт не работает |
+| `escapeshellarg` | Экранирование IP в shell-команде | ❌ защита от injection |
+| `filter_var` | Валидация IPv4/IPv6 | ❌ |
+| `hash_equals` | Защита API-ключа от timing-атак | ⚠️ желательно |
+| `posix_geteuid` | Определение пользователя PHP в диагностике | ⚠️ опционально |
+
+**Что можно отключать без проблем** (наоборот, рекомендуется отключать для безопасности): `shell_exec`, `system`, `passthru`, `popen`, `proc_open`, `eval`. Скрипт их не использует.
+
+### Права пользователя PHP
+
+Пользователь, под которым работает PHP-FPM (обычно `www-data`, `nginx`, `apache` или `php`), должен уметь запускать три команды через `sudo` без пароля:
+
+```bash
+# Создай файл /etc/sudoers.d/iptables-api:
+Cmnd_Alias IPSET_CMDS = /usr/sbin/ipset, /sbin/ipset, /bin/ipset
+Cmnd_Alias IPT4_CMDS  = /sbin/iptables, /usr/sbin/iptables
+Cmnd_Alias IPT6_CMDS  = /sbin/ip6tables, /usr/sbin/ip6tables
+
+www-data ALL=(root) NOPASSWD: IPSET_CMDS, IPT4_CMDS, IPT6_CMDS
+```
+
+Замени `www-data` на реального пользователя PHP. Узнать его можно:
+
+```bash
+ps aux | grep php-fpm | grep -v root | head -1 | awk '{print $1}'
+```
+
+Или через саму диагностику — она покажет поле **«Пользователь PHP»**.
+
+Применить:
+
+```bash
+sudo chmod 440 /etc/sudoers.d/iptables-api
+sudo visudo -cf /etc/sudoers.d/iptables-api  # проверка синтаксиса
+```
+
+### Веб-сервер
+
+Любой, умеющий запускать PHP:
+
+- **nginx + PHP-FPM** — рекомендуемая связка
+- **Apache + mod_php / PHP-FPM**
+- **LiteSpeed / OpenLiteSpeed**
+- **Caddy + PHP-FPM**
+
+Специальной конфигурации не требуется. Никаких WebSocket-ов, long-polling, chunked-ответов — обычный `POST/GET → JSON`.
+
+### Доступ к файловой системе
+
+- Скрипт **не создаёт файлов** на диске (кроме временных от PHP error_log если включено)
+- Достаточно прав `read` на `iptables.php` и `settings.php` для пользователя PHP
+- Запись в `/tmp` желательна (для логов PHP, если они включены) — но не критична
+
+### Сеть
+
+- Порт веб-сервера (обычно 80/443) — открыт для клиентов API
+- **Никаких исходящих соединений скрипт не делает** — всё работает локально через `sudo ipset`
+- Никакого Redis, никакой БД, никакого composer/npm
+
+### Ядро и контейнеры
+
+| Окружение | Работает? |
+|---|---|
+| Железный сервер / VDS / VPS | ✅ Да |
+| KVM / Xen / VMware | ✅ Да |
+| OpenVZ (старые версии) | ⚠️ Только если хостер разрешил `ipset` и загрузку `xt_set` |
+| LXC-контейнер с `CAP_NET_ADMIN` | ✅ Да |
+| Docker с `--cap-add=NET_ADMIN --cap-add=NET_RAW` | ✅ Да |
+| Docker обычный | ❌ Нет прав на изменение правил ядра |
+| Shared-хостинг | ❌ Обычно нет `sudo` и iptables |
+
+### Что делает скрипт при первом запуске
+
+Если окружение настроено корректно, при первой блокировке IP:
+
+1. Создаёт ipset-сет `banlist4` (hash:ip, timeout 3600s, maxelem 1M)
+2. Создаёт ipset-сет `banlist6` (family inet6)
+3. Вставляет правило в `INPUT`: `iptables -I INPUT -m set --match-set banlist4 src -j DROP`
+4. То же для `ip6tables`
+
+После этого любой IP, добавленный в сет, блокируется мгновенно. Ядро само удаляет записи по истечении таймаута.
+
+### Что произойдёт после перезагрузки сервера
+
+Сеты живут в памяти ядра, после ребута пропадают вместе с правилами. При первом HTTP-запросе скрипт создаст их заново с пустым содержимым. Если нужно сохранить баны между ребутами — добавь в `crontab -e` пользователя root:
+
+```
+# Сохранять каждые 5 минут
+*/5 * * * * ipset save banlist4 banlist6 > /etc/ipset.conf
+
+# Восстанавливать при старте (через systemd-unit или /etc/rc.local)
+@reboot ipset restore < /etc/ipset.conf 2>/dev/null
+```
+
+Но обычно это не нужно — после ребута достаточно нескольких минут трафика чтобы перебанить активных нарушителей.
+
+### Проверка что всё работает
+
+Открой в браузере:
+
+```
+https://your-domain.com/path/to/iptables.php?api_key=ВАШ_КЛЮЧ
+```
+
+Нажми на вкладку **🔍 Диагностика**. Если все пункты ✅ — скрипт готов к работе. Если есть ❌ — читай подсказки, там точные команды для исправления.
+
+Быстрый тест через API:
+
+```bash
+# Должен вернуть JSON с количеством заблокированных IP = 0
+curl "https://your-domain.com/path/to/iptables.php?action=list&api=1&api_key=ВАШ_КЛЮЧ"
+```
+
+Если получил HTTP 200 и валидный JSON — всё работает.
+
 ## Лицензия
 
 MIT
