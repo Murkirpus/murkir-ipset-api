@@ -1200,11 +1200,7 @@ header('Cache-Control: no-store');
                     Добавь <code>&amp;api=1</code> чтобы получить JSON (без — вернётся HTML с сообщением).
                 </p>
                 <?php
-                // Путь к скрипту относительно корня сайта — работает из любой вложенной папки
-                // SCRIPT_NAME: "/api/nftables.php", "/tools/firewall/nftables.php" и т.д.
-                $_base = isset($_SERVER['SCRIPT_NAME']) && $_SERVER['SCRIPT_NAME'] !== ''
-                    ? $_SERVER['SCRIPT_NAME']
-                    : '/' . basename(__FILE__);
+                $_base = '' . basename(__FILE__);
                 $_key  = urlencode($API_KEY);
                 $_examples = array(
                     array(
