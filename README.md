@@ -1,4 +1,5 @@
 <img src="./murkir-ipset-api.png" alt="Демонстрация" width="1000">
+<img src="./2026-04-21.png" alt="Демонстрация" width="1000">
 Добавил nftables.php - работает с nftables - есть блокировка целых списков IP и CIDR, как по API так и в WEB интерфейсе!
 
 # murkir-ipset-api
