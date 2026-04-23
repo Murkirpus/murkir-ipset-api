@@ -16,15 +16,20 @@
  * API (добавить &api=1 для JSON-ответа):
  *   block   - ?action=block&ip=IP_ИЛИ_CIDR&api_key=KEY[&timeout=СЕК]&api=1
  *   unblock - ?action=unblock&ip=IP_ИЛИ_CIDR&api_key=KEY&api=1
- *   list    - ?action=list&api_key=KEY&api=1      (IPv4)
- *   list6   - ?action=list6&api_key=KEY&api=1     (IPv6)
+ *   list    - ?action=list&api_key=KEY&api=1      (IPv4: одиночные IP + CIDR)
+ *   list6   - ?action=list6&api_key=KEY&api=1     (IPv6: одиночные IP + CIDR)
  *   clear   - ?action=clear&api_key=KEY&api=1
  *   debug   - ?action=debug&api_key=KEY&api=1
+ *   diag    - ?action=diag&api_key=KEY&api=1
+ *   init    - ?action=init&api_key=KEY&api=1
  *
  * Примеры:
  *   ?action=block&ip=192.168.1.10
  *   ?action=block&ip=192.168.0.0/24
  *   ?action=block&ip=2001:db8::/32
+ *   ?action=unblock&ip=192.168.0.0/24
+ *
+ * Готовые URL с твоим ключом — см. вкладку «Блокировка» → «📡 Примеры API-запросов».
  */
 
 error_reporting(E_ALL & ~E_NOTICE & ~E_DEPRECATED);
@@ -1005,6 +1010,109 @@ header('Cache-Control: no-store');
                     </form>
                 </div>
             </div>
+
+            <div style="margin-top: 30px; padding-top: 30px; border-top: 2px solid #e0e0e0;">
+                <h3>📡 Примеры API-запросов</h3>
+                <p style="color: #666; margin-top: 8px; margin-bottom: 15px;">
+                    Готовые URL с твоим реальным API-ключом. Можно копировать и вставлять в браузер, curl или скрипты.
+                    Добавь <code>&amp;api=1</code> чтобы получить JSON (без — вернётся HTML со страницей).
+                </p>
+                <?php
+                $_base = '' . basename(__FILE__);
+                $_key  = urlencode($API_KEY);
+                $_examples = array(
+                    array(
+                        'title' => '🔒 Блокировка одного IPv4 на 1 час (дефолт)',
+                        'url'   => "$_base?action=block&ip=203.0.113.45&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '🔒 Блокировка IPv4 на 30 минут (1800 сек)',
+                        'url'   => "$_base?action=block&ip=198.51.100.23&api_key=$_key&timeout=1800&api=1",
+                    ),
+                    array(
+                        'title' => '🔒 Блокировка IPv4 на сутки (86400 сек)',
+                        'url'   => "$_base?action=block&ip=192.0.2.77&api_key=$_key&timeout=86400&api=1",
+                    ),
+                    array(
+                        'title' => '🔒 Блокировка подсети IPv4 /24 (CIDR)',
+                        'url'   => "$_base?action=block&ip=" . urlencode('203.0.113.0/24') . "&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '🔒 Блокировка большой подсети IPv4 /16 на 2 часа',
+                        'url'   => "$_base?action=block&ip=" . urlencode('198.51.0.0/16') . "&api_key=$_key&timeout=7200&api=1",
+                    ),
+                    array(
+                        'title' => '🔒 Блокировка одного IPv6',
+                        'url'   => "$_base?action=block&ip=" . urlencode('2001:db8:abcd::15') . "&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '🔒 Блокировка подсети IPv6 /64',
+                        'url'   => "$_base?action=block&ip=" . urlencode('2001:db8:abcd::/64') . "&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '🔒 Блокировка большой IPv6-подсети /32 на 12 часов',
+                        'url'   => "$_base?action=block&ip=" . urlencode('2001:db8::/32') . "&api_key=$_key&timeout=43200&api=1",
+                    ),
+                    array(
+                        'title' => '🔓 Разблокировка IPv4',
+                        'url'   => "$_base?action=unblock&ip=203.0.113.45&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '🔓 Разблокировка подсети IPv4 /24',
+                        'url'   => "$_base?action=unblock&ip=" . urlencode('203.0.113.0/24') . "&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '🔓 Разблокировка IPv6',
+                        'url'   => "$_base?action=unblock&ip=" . urlencode('2001:db8:abcd::15') . "&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '🔓 Разблокировка подсети IPv6 /64',
+                        'url'   => "$_base?action=unblock&ip=" . urlencode('2001:db8:abcd::/64') . "&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '📋 Список заблокированных IPv4 (одиночные + CIDR)',
+                        'url'   => "$_base?action=list&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '📋 Список заблокированных IPv6 (одиночные + CIDR)',
+                        'url'   => "$_base?action=list6&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '🗑️ Снять ВСЕ баны (IP + CIDR, v4 + v6)',
+                        'url'   => "$_base?action=clear&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '🔍 Диагностика системы (PHP, бинарники, sudoers, сеты)',
+                        'url'   => "$_base?action=diag&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '🛠️ Отладочная информация (состояние сетов и правил)',
+                        'url'   => "$_base?action=debug&api_key=$_key&api=1",
+                    ),
+                    array(
+                        'title' => '⚡ Принудительная инициализация сетов и правил (миграция hash:ip → hash:net)',
+                        'url'   => "$_base?action=init&api_key=$_key&api=1",
+                    ),
+                );
+                ?>
+                <div style="display:flex; flex-direction:column; gap:12px;">
+                <?php foreach ($_examples as $ex): ?>
+                    <div style="background:#f8f9fa; border:1px solid #e0e0e0; border-radius:8px; padding:12px 14px;">
+                        <div style="font-weight:600; color:#333; margin-bottom:6px; font-size:14px;"><?php echo htmlspecialchars($ex['title']); ?></div>
+                        <div style="display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap;">
+                            <code style="flex:1; min-width:200px; background:#fff; padding:8px 10px; border:1px solid #e0e0e0; border-radius:6px; font-size:12px; font-family:monospace; color:#1565c0; word-break:break-all; user-select:all;"><?php echo htmlspecialchars($ex['url']); ?></code>
+                            <button type="button" class="btn btn-primary" style="padding:6px 12px; font-size:12px; white-space:nowrap;" onclick="copyExample(this, <?php echo htmlspecialchars(json_encode($ex['url']), ENT_QUOTES); ?>)">📋 Копировать</button>
+                            <a href="<?php echo htmlspecialchars($ex['url']); ?>" target="_blank" class="btn btn-warning" style="padding:6px 12px; font-size:12px; white-space:nowrap; text-decoration:none; display:inline-block;">▶ Выполнить</a>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+                </div>
+
+                <div style="margin-top:20px; padding:15px; background:#fff3e0; border-left:4px solid #ff9800; border-radius:4px; font-size:13px; color:#333;">
+                    💡 <strong>Подсказка:</strong> для curl используй кавычки вокруг URL (из-за <code>&amp;</code>):<br>
+                    <code style="display:block; margin-top:6px; background:#fff; padding:8px 10px; border:1px solid #e0e0e0; border-radius:6px; word-break:break-all; user-select:all;">curl "https://ваш-домен.ru/<?php echo htmlspecialchars("$_base?action=block&ip=203.0.113.45&api_key=$_key&api=1"); ?>"</code>
+                </div>
+            </div>
         </div>
 
         <div id="list-tab" class="tab-content">
@@ -1216,6 +1324,37 @@ header('Cache-Control: no-store');
             }
             document.body.appendChild(form);
             form.submit();
+        }
+
+        function copyExample(btn, text) {
+            var origin = window.location.origin;
+            var pathname = window.location.pathname;
+            // Склеиваем с полным путём, чтобы копировать абсолютный URL
+            var dir = pathname.substring(0, pathname.lastIndexOf('/') + 1);
+            var fullUrl = origin + dir + text;
+            var done = function() {
+                var old = btn.innerHTML;
+                btn.innerHTML = '✓ Готово';
+                btn.disabled = true;
+                setTimeout(function() { btn.innerHTML = old; btn.disabled = false; }, 1500);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(fullUrl).then(done, function() {
+                    fallbackCopy(fullUrl); done();
+                });
+            } else {
+                fallbackCopy(fullUrl); done();
+            }
+        }
+
+        function fallbackCopy(text) {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed'; ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch(e) {}
+            document.body.removeChild(ta);
         }
 
         function updateStats() {
