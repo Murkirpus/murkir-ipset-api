@@ -1,9 +1,10 @@
 <?php
 /**
- * iptables.php - Управление блокировкой IP через ipset
- * Версия: 3.2 (minimal + UI)
+ * iptables.php - Управление блокировкой IP/CIDR через ipset
+ * Версия: 3.3 (CIDR support)
  *
- * Блокирует весь трафик от IP на уровне INPUT.
+ * Блокирует весь трафик от IP или подсети CIDR на уровне INPUT.
+ * Сеты используют hash:net — поддерживают как одиночные IP, так и CIDR.
  * Авто-разбан через timeout (дефолт 1 час).
  * После reboot сеты пересоздаются при первом запросе.
  *
@@ -13,12 +14,17 @@
  * Веб-интерфейс: /iptables.php?api_key=ВАШ_КЛЮЧ
  *
  * API (добавить &api=1 для JSON-ответа):
- *   block   - ?action=block&ip=IP&api_key=KEY[&timeout=СЕК]&api=1
- *   unblock - ?action=unblock&ip=IP&api_key=KEY&api=1
+ *   block   - ?action=block&ip=IP_ИЛИ_CIDR&api_key=KEY[&timeout=СЕК]&api=1
+ *   unblock - ?action=unblock&ip=IP_ИЛИ_CIDR&api_key=KEY&api=1
  *   list    - ?action=list&api_key=KEY&api=1      (IPv4)
  *   list6   - ?action=list6&api_key=KEY&api=1     (IPv6)
  *   clear   - ?action=clear&api_key=KEY&api=1
  *   debug   - ?action=debug&api_key=KEY&api=1
+ *
+ * Примеры:
+ *   ?action=block&ip=192.168.1.10
+ *   ?action=block&ip=192.168.0.0/24
+ *   ?action=block&ip=2001:db8::/32
  */
 
 error_reporting(E_ALL & ~E_NOTICE & ~E_DEPRECATED);
@@ -65,6 +71,72 @@ function ipVersion($ip) {
 }
 
 /**
+ * Разбирает IP или CIDR. Возвращает массив или false.
+ *   ip      — сам адрес (без маски)
+ *   mask    — длина префикса (для /N), или полная ширина для одиночного IP (32/128)
+ *   version — 4 или 6
+ *   is_cidr — true, если во входе была маска
+ *   raw     — нормализованная строка для передачи в ipset
+ */
+function parseIpOrCidr($input) {
+    $input = trim((string)$input);
+    if ($input === '') return false;
+
+    $is_cidr = false;
+    if (strpos($input, '/') !== false) {
+        $parts = explode('/', $input, 2);
+        if (count($parts) !== 2) return false;
+        $ip   = $parts[0];
+        $mask = $parts[1];
+        if ($mask === '' || !ctype_digit($mask)) return false;
+        $mask = (int)$mask;
+        $is_cidr = true;
+    } else {
+        $ip = $input;
+        $mask = null;
+    }
+
+    $v = ipVersion($ip);
+    if (!$v) return false;
+
+    $max_bits = ($v === 4) ? 32 : 128;
+    if ($mask === null) $mask = $max_bits;
+    if ($mask < 0 || $mask > $max_bits) return false;
+
+    return array(
+        'ip'      => $ip,
+        'mask'    => $mask,
+        'version' => $v,
+        'is_cidr' => $is_cidr,
+        'raw'     => $is_cidr ? ($ip . '/' . $mask) : $ip,
+    );
+}
+
+/**
+ * Проверяет, пересекаются ли два CIDR/IP (одна из сторон содержит другую).
+ * Каждый вход — "IP" или "IP/mask". Только в пределах одной IP-версии.
+ */
+function cidrsOverlap($a, $b) {
+    $pa = parseIpOrCidr($a);
+    $pb = parseIpOrCidr($b);
+    if (!$pa || !$pb) return false;
+    if ($pa['version'] !== $pb['version']) return false;
+
+    $bin_a = @inet_pton($pa['ip']);
+    $bin_b = @inet_pton($pb['ip']);
+    if ($bin_a === false || $bin_b === false) return false;
+
+    $min_mask = min($pa['mask'], $pb['mask']);
+    $full_bytes = (int)($min_mask / 8);
+    $remainder  = $min_mask % 8;
+    $mask_bin = str_repeat("\xff", $full_bytes);
+    if ($remainder > 0) $mask_bin .= chr(0xff << (8 - $remainder) & 0xff);
+    $mask_bin = str_pad($mask_bin, strlen($bin_a), "\x00");
+
+    return ($bin_a & $mask_bin) === ($bin_b & $mask_bin);
+}
+
+/**
  * Проверяет, входит ли IP в подсеть CIDR.
  * Поддерживает IPv4 и IPv6. Возвращает true/false.
  */
@@ -103,10 +175,13 @@ function ipInCidr($ip, $cidr) {
 }
 
 /**
- * Проверяет, находится ли IP в whitelist из settings.php.
+ * Проверяет, пересекается ли IP/CIDR с whitelist из settings.php.
+ * Для одиночного IP — обычное "IP ∈ CIDR" из whitelist.
+ * Для CIDR — пересечение в любую сторону (чтобы нельзя было заблокировать
+ * 0.0.0.0/0 и похоронить всех whitelisted).
  * Loopback (127.0.0.0/8 и ::1) всегда в whitelist.
  */
-function isWhitelisted($ip) {
+function isWhitelisted($target) {
     global $IP_WHITELIST;
 
     // Дефолтный whitelist — loopback всегда защищён
@@ -117,7 +192,7 @@ function isWhitelisted($ip) {
     foreach ($list as $entry) {
         $entry = trim($entry);
         if ($entry === '') continue;
-        if (ipInCidr($ip, $entry)) return $entry;
+        if (cidrsOverlap($target, $entry)) return $entry;
     }
     return false;
 }
@@ -135,19 +210,33 @@ function formatDuration($s) {
     return implode(' ', $p);
 }
 
+/**
+ * Возвращает тип существующего сета ('hash:ip', 'hash:net', ...) или null.
+ */
+function getSetType($setName) {
+    exec("sudo ipset list " . escapeshellarg($setName) . " -t 2>/dev/null", $out, $rc);
+    if ($rc !== 0) return null;
+    foreach ($out as $line) {
+        if (preg_match('/^Type:\s*(\S+)/i', trim($line), $m)) {
+            return strtolower($m[1]);
+        }
+    }
+    return null;
+}
+
 function ensureSetsReady() {
     static $ready = false;
     if ($ready) return;
 
     exec("sudo ipset list " . IPSET_V4 . " -name 2>/dev/null", $o, $rc);
     if ($rc !== 0) {
-        exec(sprintf("sudo ipset create %s hash:ip timeout %d maxelem %d 2>&1",
+        exec(sprintf("sudo ipset create %s hash:net timeout %d maxelem %d 2>&1",
             IPSET_V4, BAN_TIMEOUT, IPSET_MAXELEM));
     }
 
     exec("sudo ipset list " . IPSET_V6 . " -name 2>/dev/null", $o, $rc);
     if ($rc !== 0) {
-        exec(sprintf("sudo ipset create %s hash:ip family inet6 timeout %d maxelem %d 2>&1",
+        exec(sprintf("sudo ipset create %s hash:net family inet6 timeout %d maxelem %d 2>&1",
             IPSET_V6, BAN_TIMEOUT, IPSET_MAXELEM));
     }
 
@@ -162,16 +251,18 @@ function ensureSetsReady() {
 
 // --- Операции ---
 
-function blockIP($ip, $timeout = 0) {
-    $v = ipVersion($ip);
-    if (!$v) return array('status' => 'error', 'message' => "Неверный формат IP: $ip");
+function blockIP($input, $timeout = 0) {
+    $p = parseIpOrCidr($input);
+    if (!$p) return array('status' => 'error', 'message' => "Неверный формат IP/CIDR: $input");
+
+    $label = $p['raw'];
 
     // Защита от самострела — whitelist из settings.php
-    $matched = isWhitelisted($ip);
+    $matched = isWhitelisted($label);
     if ($matched !== false) {
         return array(
             'status'  => 'warning',
-            'message' => "IP $ip в белом списке — блокировка отклонена",
+            'message' => "$label пересекается с белым списком — блокировка отклонена",
             'details' => "Совпадение с правилом: $matched",
         );
     }
@@ -179,39 +270,55 @@ function blockIP($ip, $timeout = 0) {
     $timeout = ($timeout > 0) ? (int)$timeout : BAN_TIMEOUT;
     ensureSetsReady();
 
-    $set = ($v === 4) ? IPSET_V4 : IPSET_V6;
+    $set = ($p['version'] === 4) ? IPSET_V4 : IPSET_V6;
+
+    // Проверка: если сет существующего типа hash:ip — CIDR не поддержится
+    if ($p['is_cidr']) {
+        $type = getSetType($set);
+        if ($type !== null && $type !== 'hash:net') {
+            return array(
+                'status'  => 'error',
+                'message' => "Сет $set имеет тип $type и не поддерживает CIDR",
+                'details' => 'Откройте вкладку "Диагностика" и нажмите «Инициализировать» для миграции на hash:net',
+            );
+        }
+    }
+
     $cmd = sprintf("sudo ipset add %s %s timeout %d -exist 2>&1",
-        $set, escapeshellarg($ip), $timeout);
+        $set, escapeshellarg($label), $timeout);
 
     exec($cmd, $out, $rc);
 
     if ($rc !== 0) {
-        return array('status' => 'error', 'message' => "Ошибка блокировки IP: $ip", 'details' => implode("\n", $out));
+        return array('status' => 'error', 'message' => "Ошибка блокировки: $label", 'details' => implode("\n", $out));
     }
 
+    $kind = $p['is_cidr'] ? 'CIDR' : 'IP';
     return array(
         'status'  => 'success',
-        'message' => "IP $ip заблокирован на " . formatDuration($timeout),
+        'message' => "$kind $label заблокирован на " . formatDuration($timeout),
         'details' => "Set: $set, timeout: $timeout сек",
     );
 }
 
-function unblockIP($ip) {
-    $v = ipVersion($ip);
-    if (!$v) return array('status' => 'error', 'message' => "Неверный формат IP: $ip");
+function unblockIP($input) {
+    $p = parseIpOrCidr($input);
+    if (!$p) return array('status' => 'error', 'message' => "Неверный формат IP/CIDR: $input");
+
+    $label = $p['raw'];
 
     ensureSetsReady();
 
-    $set = ($v === 4) ? IPSET_V4 : IPSET_V6;
-    $cmd = sprintf("sudo ipset del %s %s 2>&1", $set, escapeshellarg($ip));
+    $set = ($p['version'] === 4) ? IPSET_V4 : IPSET_V6;
+    $cmd = sprintf("sudo ipset del %s %s 2>&1", $set, escapeshellarg($label));
 
     exec($cmd, $out, $rc);
 
     if ($rc !== 0) {
-        return array('status' => 'warning', 'message' => "IP $ip не найден в списке или уже разблокирован");
+        return array('status' => 'warning', 'message' => "$label не найден в списке или уже разблокирован");
     }
 
-    return array('status' => 'success', 'message' => "IP $ip успешно разблокирован", 'details' => "Удалён из $set");
+    return array('status' => 'success', 'message' => "$label успешно разблокирован", 'details' => "Удалён из $set");
 }
 
 function listBlockedIPs($version) {
@@ -503,21 +610,34 @@ function runDiagnostics() {
     );
 
     // --- 6. Состояние сетов ipset ---
-    exec("sudo -n ipset list " . IPSET_V4 . " -name 2>/dev/null", $o4, $rc4);
-    $checks[] = array(
-        'name'   => 'ipset: ' . IPSET_V4,
-        'status' => ($rc4 === 0) ? 'ok' : 'warn',
-        'value'  => ($rc4 === 0) ? 'существует' : 'не создан',
-        'hint'   => ($rc4 === 0) ? '' : 'Будет создан автоматически при первой блокировке IPv4',
-    );
+    $check_set = function($setName) {
+        $type = getSetType($setName);
+        if ($type === null) {
+            return array(
+                'status' => 'warn',
+                'value'  => 'не создан',
+                'hint'   => 'Будет создан автоматически при первой блокировке',
+            );
+        }
+        if ($type !== 'hash:net') {
+            return array(
+                'status' => 'warn',
+                'value'  => 'тип ' . $type . ' (без поддержки CIDR)',
+                'hint'   => 'Нажмите «Инициализировать» — сет будет пересоздан как hash:net. Все текущие баны в нём сбросятся.',
+            );
+        }
+        return array(
+            'status' => 'ok',
+            'value'  => 'существует (hash:net)',
+            'hint'   => '',
+        );
+    };
 
-    exec("sudo -n ipset list " . IPSET_V6 . " -name 2>/dev/null", $o6, $rc6);
-    $checks[] = array(
-        'name'   => 'ipset: ' . IPSET_V6,
-        'status' => ($rc6 === 0) ? 'ok' : 'warn',
-        'value'  => ($rc6 === 0) ? 'существует' : 'не создан',
-        'hint'   => ($rc6 === 0) ? '' : 'Будет создан автоматически при первой блокировке IPv6',
-    );
+    $r4 = $check_set(IPSET_V4);
+    $checks[] = array('name' => 'ipset: ' . IPSET_V4) + $r4;
+
+    $r6 = $check_set(IPSET_V6);
+    $checks[] = array('name' => 'ipset: ' . IPSET_V6) + $r6;
 
     // --- 7. Правила INPUT ---
     exec("sudo -n iptables -C INPUT -m set --match-set " . IPSET_V4 . " src -j DROP 2>/dev/null", $o, $rci4);
@@ -545,8 +665,7 @@ function runDiagnostics() {
         foreach ($IP_WHITELIST as $entry) {
             $entry = trim($entry);
             if ($entry === '') continue;
-            $check_ip = (strpos($entry, '/') !== false) ? explode('/', $entry)[0] : $entry;
-            if (!ipVersion($check_ip)) $wl_invalid[] = $entry;
+            if (!parseIpOrCidr($entry)) $wl_invalid[] = $entry;
         }
     }
     $checks[] = array(
@@ -597,40 +716,58 @@ function runDiagnostics() {
 /**
  * Принудительная инициализация: создаёт сеты и правила сейчас,
  * а не лениво при первом запросе. Возвращает подробный лог.
+ * Если существующий сет имеет тип hash:ip — пересоздаёт его как hash:net
+ * (для поддержки CIDR). Все текущие баны в этом сете сбрасываются.
  */
 function initSystem() {
     $log = array();
     $success = true;
 
-    // IPv4 сет
-    exec("sudo ipset list " . IPSET_V4 . " -name 2>&1", $o, $rc);
-    if ($rc !== 0) {
-        exec(sprintf("sudo ipset create %s hash:ip timeout %d maxelem %d 2>&1",
-            IPSET_V4, BAN_TIMEOUT, IPSET_MAXELEM), $o2, $rc2);
-        if ($rc2 === 0) {
-            $log[] = '✅ Создан сет ' . IPSET_V4;
-        } else {
-            $log[] = '❌ Не удалось создать ' . IPSET_V4 . ': ' . implode(' ', $o2);
-            $success = false;
+    $ensure_hashnet = function($setName, $family, &$log, &$success) {
+        $current = getSetType($setName);
+        if ($current === null) {
+            // Не существует — создаём
+            $family_flag = ($family === 6) ? ' family inet6' : '';
+            exec(sprintf("sudo ipset create %s hash:net%s timeout %d maxelem %d 2>&1",
+                $setName, $family_flag, BAN_TIMEOUT, IPSET_MAXELEM), $o2, $rc2);
+            if ($rc2 === 0) {
+                $log[] = '✅ Создан сет ' . $setName . ' (hash:net)';
+            } else {
+                $log[] = '❌ Не удалось создать ' . $setName . ': ' . implode(' ', $o2);
+                $success = false;
+            }
+            return;
         }
-    } else {
-        $log[] = '✓ ' . IPSET_V4 . ' уже существует';
-    }
 
-    // IPv6 сет
-    exec("sudo ipset list " . IPSET_V6 . " -name 2>&1", $o, $rc);
-    if ($rc !== 0) {
-        exec(sprintf("sudo ipset create %s hash:ip family inet6 timeout %d maxelem %d 2>&1",
-            IPSET_V6, BAN_TIMEOUT, IPSET_MAXELEM), $o2, $rc2);
+        if ($current === 'hash:net') {
+            $log[] = '✓ ' . $setName . ' уже существует (hash:net)';
+            return;
+        }
+
+        // Миграция: старый тип → hash:net. Снимаем правило, удаляем сет, создаём заново.
+        $ipt = ($family === 6) ? 'ip6tables' : 'iptables';
+        exec("sudo $ipt -D INPUT -m set --match-set $setName src -j DROP 2>&1");
+
+        exec("sudo ipset destroy " . escapeshellarg($setName) . " 2>&1", $o_del, $rc_del);
+        if ($rc_del !== 0) {
+            $log[] = '❌ Не удалось уничтожить старый ' . $setName . ' (' . $current . '): ' . implode(' ', $o_del);
+            $success = false;
+            return;
+        }
+
+        $family_flag = ($family === 6) ? ' family inet6' : '';
+        exec(sprintf("sudo ipset create %s hash:net%s timeout %d maxelem %d 2>&1",
+            $setName, $family_flag, BAN_TIMEOUT, IPSET_MAXELEM), $o2, $rc2);
         if ($rc2 === 0) {
-            $log[] = '✅ Создан сет ' . IPSET_V6;
+            $log[] = '⚡ Миграция: ' . $setName . ' пересоздан как hash:net (прошлые баны сброшены)';
         } else {
-            $log[] = '❌ Не удалось создать ' . IPSET_V6 . ': ' . implode(' ', $o2);
+            $log[] = '❌ Не удалось создать новый ' . $setName . ': ' . implode(' ', $o2);
             $success = false;
         }
-    } else {
-        $log[] = '✓ ' . IPSET_V6 . ' уже существует';
-    }
+    };
+
+    $ensure_hashnet(IPSET_V4, 4, $log, $success);
+    $ensure_hashnet(IPSET_V6, 6, $log, $success);
 
     // iptables правило
     exec("sudo iptables -C INPUT -m set --match-set " . IPSET_V4 . " src -j DROP 2>/dev/null", $o, $rc);
@@ -803,8 +940,8 @@ header('Cache-Control: no-store');
 <body>
     <div class="container">
         <div class="header">
-            <h1>🛡️ Управление блокировкой IP (ipset)</h1>
-            <p>Авто-разбан через <?php echo formatDuration(BAN_TIMEOUT); ?>. Сеты: <code><?php echo IPSET_V4; ?></code> / <code><?php echo IPSET_V6; ?></code></p>
+            <h1>🛡️ Управление блокировкой IP / CIDR (ipset)</h1>
+            <p>Поддержка одиночных IP и подсетей CIDR. Авто-разбан через <?php echo formatDuration(BAN_TIMEOUT); ?>. Сеты: <code><?php echo IPSET_V4; ?></code> / <code><?php echo IPSET_V6; ?></code> (hash:net)</p>
             <div class="info-box"><strong>Ваш IP:</strong> <span id="userIP"><?php echo htmlspecialchars(getUserIP()); ?></span></div>
         </div>
 
@@ -831,12 +968,15 @@ header('Cache-Control: no-store');
         </div>
 
         <div id="block-tab" class="tab-content active">
-            <h2>Блокировка / Разблокировка IP</h2>
+            <h2>Блокировка / Разблокировка IP или CIDR</h2>
 
             <form method="post" action="">
                 <div class="form-group">
-                    <label for="ip">IP-адрес (IPv4 или IPv6)</label>
-                    <input type="text" id="ip" name="ip" placeholder="192.168.1.10 или 2001:db8::1" required>
+                    <label for="ip">IP-адрес или CIDR (IPv4 / IPv6)</label>
+                    <input type="text" id="ip" name="ip" placeholder="192.168.1.10, 192.168.0.0/24, 2001:db8::1 или 2001:db8::/32" required>
+                    <small style="display:block; margin-top:6px; color:#666;">
+                        Примеры: <code>192.168.1.10</code>, <code>192.168.0.0/24</code>, <code>10.0.0.0/8</code>, <code>2001:db8::/32</code>
+                    </small>
                 </div>
 
                 <div class="form-group">
@@ -868,7 +1008,7 @@ header('Cache-Control: no-store');
         </div>
 
         <div id="list-tab" class="tab-content">
-            <h2>Заблокированные IP-адреса</h2>
+            <h2>Заблокированные IP и подсети (CIDR)</h2>
             <h3>IPv4 (<span id="ipv4-count">...</span>)</h3>
             <div id="ipv4-list">Загрузка...</div>
             <h3 style="margin-top: 30px;">IPv6 (<span id="ipv6-count">...</span>)</h3>
