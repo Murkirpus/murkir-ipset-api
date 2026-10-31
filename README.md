@@ -6,6 +6,8 @@
 
 **PHP API и веб-интерфейс для блокировки IPv4/IPv6 через `ipset`** с авто-разбаном на уровне ядра Linux. Один файл, без cron, без cleanup-скриптов, без composer.
 
+Придумал ещё одно мощное применение для этого API.
+https://murkir.com/murkir-security-nginx-429-avtomaticheskaya-blokirovka-ip
 Часть экосистемы [MurKir Security](#связанные-проекты).
 
 Для безопасности нужно запускать iptables.php на отдельном субдомене и на отдельной версии PHP с включенным exec.
