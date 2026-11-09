@@ -18,6 +18,8 @@
  *   unblock - ?action=unblock&ip=IP_ИЛИ_CIDR&api_key=KEY&api=1
  *   list    - ?action=list&api_key=KEY&api=1      (IPv4: одиночные IP + CIDR)
  *   list6   - ?action=list6&api_key=KEY&api=1     (IPv6: одиночные IP + CIDR)
+ *             для list/list6 добавь &rdns=1, чтобы заполнить поле rdns
+ *   rdns    - ?action=rdns&ips=IP1,IP2,...&api_key=KEY&api=1  (до 200 IP, PTR с кэшем)
  *   clear   - ?action=clear&api_key=KEY&api=1
  *   debug   - ?action=debug&api_key=KEY&api=1
  *   diag    - ?action=diag&api_key=KEY&api=1
@@ -326,6 +328,233 @@ function unblockIP($input) {
     return array('status' => 'success', 'message' => "$label успешно разблокирован", 'details' => "Удалён из $set");
 }
 
+// --- R-DNS: пакетный параллельный резолв с таймаутом и кэшем ---
+//
+// Раньше на каждый IP вызывался gethostbyaddr() — он блокирующий и без таймаута
+// (до ~5-10 сек на адрес без PTR). При сотнях заблокированных IP страница висла.
+// Теперь: список отдаётся сразу без R-DNS, а имена подгружаются отдельным
+// запросом ?action=rdns — все PTR-запросы уходят одновременно по UDP,
+// общий лимит времени RDNS_TIMEOUT, результаты кэшируются в файле.
+
+if (!defined('RDNS_TIMEOUT'))     define('RDNS_TIMEOUT',     2.0);    // общий лимит на пачку, сек
+if (!defined('RDNS_BATCH_MAX'))   define('RDNS_BATCH_MAX',   200);    // макс. IP в одном запросе
+if (!defined('RDNS_CACHE_TTL'))   define('RDNS_CACHE_TTL',   86400);  // кэш найденных имён
+if (!defined('RDNS_NEG_TTL'))     define('RDNS_NEG_TTL',     3600);   // кэш «нет PTR» (таймауты — 10 мин)
+if (!defined('RDNS_CACHE_FILE'))  define('RDNS_CACHE_FILE',  sys_get_temp_dir() . '/iptables_rdns_cache.json');
+if (!defined('RDNS_CACHE_MAX'))   define('RDNS_CACHE_MAX',   50000);
+if (!defined('RDNS_PORT'))       define('RDNS_PORT',        53);
+// RDNS_NAMESERVERS — свои DNS через запятую (по умолчанию из /etc/resolv.conf)
+
+function rdnsNameservers() {
+    $ns = array();
+    if (defined('RDNS_NAMESERVERS') && RDNS_NAMESERVERS) { // напр. '1.1.1.1,8.8.8.8'
+        foreach (explode(',', RDNS_NAMESERVERS) as $n) {
+            $n = trim($n);
+            if (filter_var($n, FILTER_VALIDATE_IP)) $ns[] = $n;
+        }
+        if ($ns) return array_slice($ns, 0, 3);
+    }
+    $conf = @file('/etc/resolv.conf', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($conf) {
+        foreach ($conf as $line) {
+            if (preg_match('/^\s*nameserver\s+(\S+)/', $line, $m) && filter_var($m[1], FILTER_VALIDATE_IP)) {
+                $ns[] = $m[1];
+            }
+        }
+    }
+    if (!$ns) $ns[] = '127.0.0.1';
+    return array_slice($ns, 0, 3);
+}
+
+function rdnsPtrName($ip) {
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        return implode('.', array_reverse(explode('.', $ip))) . '.in-addr.arpa';
+    }
+    $bin = @inet_pton($ip);
+    if ($bin === false || strlen($bin) !== 16) return false;
+    return implode('.', str_split(strrev(bin2hex($bin)))) . '.ip6.arpa';
+}
+
+function rdnsBuildQuery($id, $name) {
+    $q = pack('nnnnnn', $id, 0x0100, 1, 0, 0, 0); // RD=1, 1 вопрос
+    foreach (explode('.', $name) as $label) $q .= chr(strlen($label)) . $label;
+    return $q . "\0" . pack('nn', 12, 1); // PTR, IN
+}
+
+/** Читает доменное имя (с поддержкой сжатия). $pos сдвигается за имя. */
+function rdnsReadName($buf, &$pos) {
+    $labels = array();
+    $len = strlen($buf);
+    $jumped = false;
+    $p = $pos;
+    for ($guard = 0; $guard < 128; $guard++) {
+        if ($p >= $len) return false;
+        $c = ord($buf[$p]);
+        if ($c === 0) { $p++; break; }
+        if (($c & 0xC0) === 0xC0) {
+            if ($p + 1 >= $len) return false;
+            $ptr = (($c & 0x3F) << 8) | ord($buf[$p + 1]);
+            if (!$jumped) $pos = $p + 2;
+            $jumped = true;
+            $p = $ptr;
+            continue;
+        }
+        $labels[] = substr($buf, $p + 1, $c);
+        $p += $c + 1;
+    }
+    if (!$jumped) $pos = $p;
+    return implode('.', $labels);
+}
+
+/** Разбирает ответ. Возвращает array(id, host|'' ) или false. */
+function rdnsParseResponse($buf) {
+    if (strlen($buf) < 12) return false;
+    $h = unpack('nid/nflags/nqd/nan', substr($buf, 0, 8));
+    if (!($h['flags'] & 0x8000)) return false;     // не ответ
+    $rcode = $h['flags'] & 0x0F;
+    if ($rcode !== 0 && $rcode !== 3) return false; // SERVFAIL и т.п. — пусть пробует другой NS
+    $pos = 12;
+    for ($i = 0; $i < $h['qd']; $i++) {
+        if (rdnsReadName($buf, $pos) === false) return false;
+        $pos += 4;
+    }
+    for ($i = 0; $i < $h['an']; $i++) {
+        if (rdnsReadName($buf, $pos) === false) return false;
+        if ($pos + 10 > strlen($buf)) return false;
+        $rr = unpack('ntype/nclass/Nttl/nrdlen', substr($buf, $pos, 10));
+        $pos += 10;
+        if ($rr['type'] === 12) {
+            $p = $pos;
+            $host = rdnsReadName($buf, $p);
+            if ($host !== false && $host !== '') return array($h['id'], rtrim($host, '.'));
+        }
+        $pos += $rr['rdlen'];
+    }
+    return array($h['id'], ''); // ответ есть, PTR нет
+}
+
+/**
+ * Параллельный резолв PTR для списка IP. Возвращает array(ip => host|'').
+ * IP, на которые не пришёл ответ за $timeout, получают null.
+ */
+function rdnsResolveParallel(array $ips, $timeout) {
+    $result = array();
+    $pending = array(); // id => ip
+    $queries = array(); // id => packet
+    foreach ($ips as $ip) {
+        $name = rdnsPtrName($ip);
+        if ($name === false) { $result[$ip] = ''; continue; }
+        do { $id = mt_rand(1, 65535); } while (isset($pending[$id]));
+        $pending[$id] = $ip;
+        $queries[$id] = rdnsBuildQuery($id, $name);
+        $result[$ip] = null;
+    }
+    if (!$pending) return $result;
+
+    $socks = array();
+    foreach (rdnsNameservers() as $ns) {
+        $addr = (strpos($ns, ':') !== false) ? "udp://[$ns]:" . RDNS_PORT : "udp://$ns:" . RDNS_PORT;
+        $s = @stream_socket_client($addr, $errno, $errstr, 1);
+        if ($s) { stream_set_blocking($s, false); $socks[] = $s; }
+    }
+    if (!$socks) return $result;
+
+    $start = microtime(true);
+    $deadline = $start + $timeout;
+    $round = 0;
+    $nextSend = $start;
+    // Отправка: сначала на 1-й NS, затем повтор неотвеченных на следующий NS
+    while ($pending && microtime(true) < $deadline) {
+        if (microtime(true) >= $nextSend && $round < 3) {
+            $s = $socks[$round % count($socks)];
+            foreach ($pending as $id => $ip) @fwrite($s, $queries[$id]);
+            $round++;
+            $nextSend = microtime(true) + $timeout / 3;
+        }
+        $wait = min($deadline, $nextSend) - microtime(true);
+        if ($wait <= 0) $wait = 0.01;
+        $r = $socks; $w = null; $e = null;
+        $n = @stream_select($r, $w, $e, 0, (int)($wait * 1000000));
+        if (!$n) continue;
+        foreach ($r as $s) {
+            for ($k = 0; $k < 1000; $k++) {
+                $buf = @fread($s, 4096);
+                if ($buf === false || $buf === '') break;
+                $resp = rdnsParseResponse($buf);
+                if ($resp && isset($pending[$resp[0]])) {
+                    $result[$pending[$resp[0]]] = $resp[1];
+                    unset($pending[$resp[0]]);
+                }
+            }
+        }
+    }
+    foreach ($socks as $s) @fclose($s);
+    return $result;
+}
+
+function rdnsCacheLoad(&$fh) {
+    $fh = @fopen(RDNS_CACHE_FILE, 'c+');
+    if (!$fh) return array();
+    @flock($fh, LOCK_EX);
+    $data = json_decode(stream_get_contents($fh), true);
+    return is_array($data) ? $data : array();
+}
+
+function rdnsCacheSave($fh, array $cache) {
+    if (!$fh) return;
+    $now = time();
+    foreach ($cache as $ip => $row) {
+        if (!isset($row[1]) || $row[1] < $now) unset($cache[$ip]);
+    }
+    if (count($cache) > RDNS_CACHE_MAX) $cache = array_slice($cache, -RDNS_CACHE_MAX, null, true);
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($cache));
+    fflush($fh);
+    flock($fh, LOCK_UN);
+    fclose($fh);
+}
+
+/** Пакетный R-DNS: array(ip => host|''), с кэшем. CIDR и мусор отбрасываются. */
+function resolveReverseDnsBatch(array $ips) {
+    $ips = array_values(array_unique(array_filter(array_map('trim', $ips), function ($ip) {
+        return $ip !== '' && strpos($ip, '/') === false && filter_var($ip, FILTER_VALIDATE_IP);
+    })));
+    $ips = array_slice($ips, 0, RDNS_BATCH_MAX);
+    $out = array();
+    if (!$ips) return $out;
+
+    // Кэш читаем без долгой блокировки: резолв идёт вне лока
+    $fh = null;
+    $cache = rdnsCacheLoad($fh);
+    if ($fh) { flock($fh, LOCK_UN); fclose($fh); }
+
+    $now = time();
+    $todo = array();
+    foreach ($ips as $ip) {
+        if (isset($cache[$ip]) && $cache[$ip][1] >= $now) $out[$ip] = $cache[$ip][0];
+        else $todo[] = $ip;
+    }
+
+    if ($todo) {
+        $resolved = rdnsResolveParallel($todo, RDNS_TIMEOUT);
+        $cache = rdnsCacheLoad($fh); // перечитываем под локом и дописываем
+        foreach ($resolved as $ip => $host) {
+            $out[$ip] = (string)$host;
+            $ttl = ($host === null) ? 600 : (($host === '') ? RDNS_NEG_TTL : RDNS_CACHE_TTL);
+            unset($cache[$ip]);
+            $cache[$ip] = array((string)$host, $now + $ttl);
+        }
+        rdnsCacheSave($fh, $cache);
+    }
+    return $out;
+}
+
+function resolveReverseDns($ip) {
+    $r = resolveReverseDnsBatch(array($ip));
+    return isset($r[$ip]) ? $r[$ip] : '';
+}
+
 function listBlockedIPs($version) {
     ensureSetsReady();
     $set = ($version === 6) ? IPSET_V6 : IPSET_V4;
@@ -334,6 +563,7 @@ function listBlockedIPs($version) {
 
     $ips = array();
     $details = array();
+    $want_rdns = !empty($_REQUEST['rdns']);
 
     if ($rc === 0) {
         $inMembers = false;
@@ -351,10 +581,21 @@ function listBlockedIPs($version) {
                 $ips[] = $ip;
                 $details[] = array(
                     'ip'              => $ip,
+                    'rdns'            => '',
                     'ports'           => array('all'),
                     'remaining'       => $remaining,
                     'remaining_human' => formatDuration($remaining),
                 );
+            }
+        }
+    }
+
+    // R-DNS в списке — только по явному запросу (&rdns=1), пачками и с таймаутом
+    if ($want_rdns && $details) {
+        foreach (array_chunk($ips, RDNS_BATCH_MAX) as $chunk) {
+            $map = resolveReverseDnsBatch($chunk);
+            foreach ($details as $i => $d) {
+                if (isset($map[$d['ip']])) $details[$i]['rdns'] = $map[$d['ip']];
             }
         }
     }
@@ -821,6 +1062,10 @@ switch ($action) {
     case 'unblock': $result = $ip ? unblockIP($ip)         : array('status' => 'error', 'message' => 'IP не указан'); break;
     case 'list':    $result = listBlockedIPs(4); break;
     case 'list6':   $result = listBlockedIPs(6); break;
+    case 'rdns':
+        $list = isset($_REQUEST['ips']) ? explode(',', (string)$_REQUEST['ips']) : array();
+        $result = array('status' => 'success', 'rdns' => (object)resolveReverseDnsBatch($list));
+        break;
     case 'clear':   $result = clearAllRules();   break;
     case 'debug':   $result = getDebugInfo();    break;
     case 'diag':    $result = runDiagnostics();  break;
@@ -905,6 +1150,7 @@ header('Cache-Control: no-store');
         }
         .ip-details { display: flex; flex-direction: column; gap: 4px; word-break: break-all; }
         .ip-address { font-weight: 600; color: #333; font-family: monospace; font-size: 15px; }
+        .ip-rdns { color: #555; font-family: monospace; font-size: 12px; }
         .ip-remaining {
             display: inline-block; background: #fff3e0; color: #e65100;
             padding: 2px 8px; border-radius: 4px; font-size: 12px;
@@ -1296,19 +1542,61 @@ header('Cache-Control: no-store');
             var html = '';
             for (var i = 0; i < data.blocked_details.length; i++) {
                 var info = data.blocked_details[i];
+                var rdns = '<span class="ip-rdns" data-rdns-ip="' + escapeHtml(info.ip) + '"></span>';
                 html += '<div class="ip-item">' +
                     '<div class="ip-details">' +
-                        '<span class="ip-address">' + info.ip + '</span>' +
-                        '<span class="ip-remaining">⏱️ Осталось: ' + (info.remaining_human || '—') + '</span>' +
+                        '<span class="ip-address">' + escapeHtml(info.ip) + '</span>' +
+                        rdns +
+                        '<span class="ip-remaining">⏱️ Осталось: ' + escapeHtml(info.remaining_human || '—') + '</span>' +
                     '</div>' +
                     '<form method="post" action="" style="display: inline;">' +
-                        '<input type="hidden" name="ip" value="' + info.ip + '">' +
-                        '<input type="hidden" name="api_key" value="' + apiKey + '">' +
+                        '<input type="hidden" name="ip" value="' + escapeHtml(info.ip) + '">' +
+                        '<input type="hidden" name="api_key" value="' + escapeHtml(apiKey) + '">' +
                         '<button type="submit" name="action" value="unblock" class="btn btn-danger" style="padding: 8px 16px;">Разблокировать</button>' +
                     '</form>' +
                 '</div>';
             }
             listEl.innerHTML = html;
+            loadRdns(listEl);
+        }
+
+        // R-DNS подгружается после отрисовки списка, пачками по 100 IP
+        var rdnsGen = 0;
+        function loadRdns(listEl) {
+            var gen = ++rdnsGen;
+            var spans = listEl.querySelectorAll('[data-rdns-ip]');
+            var byIp = {}, ips = [];
+            for (var i = 0; i < spans.length; i++) {
+                var ip = spans[i].getAttribute('data-rdns-ip');
+                if (ip.indexOf('/') !== -1) continue; // CIDR не резолвим
+                if (!byIp[ip]) { byIp[ip] = []; ips.push(ip); }
+                byIp[ip].push(spans[i]);
+            }
+            var BATCH = 100, pos = 0;
+            function next() {
+                if (gen !== rdnsGen || pos >= ips.length) return;
+                var chunk = ips.slice(pos, pos + BATCH);
+                pos += BATCH;
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', '?action=rdns&api=1&_t=' + Date.now(), true);
+                xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+                xhr.onload = function() {
+                    try {
+                        var data = JSON.parse(xhr.responseText);
+                        var map = data.rdns || {};
+                        for (var ip in map) {
+                            if (!map[ip] || !byIp[ip]) continue;
+                            for (var j = 0; j < byIp[ip].length; j++) {
+                                byIp[ip][j].textContent = 'R-DNS: ' + map[ip];
+                            }
+                        }
+                    } catch (e) {}
+                    next();
+                };
+                xhr.onerror = next;
+                xhr.send('api_key=' + encodeURIComponent(apiKey) + '&ips=' + encodeURIComponent(chunk.join(',')));
+            }
+            next();
         }
 
         function blockCurrentIP() {
