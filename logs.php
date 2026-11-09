@@ -25,11 +25,11 @@ const INITIAL_LINES   = 1000;        // сколько последних стр
 const MAX_CHUNK_BYTES = 2_000_000;   // максимум байт за один опрос
 const ALLOW_PUBLIC_IPS = true;       // true — доступ из интернета; false — только с localhost и локальной сети
 const AUTH_USER = 'admin';           // логин/пароль для входа НЕ с локального компьютера
-const AUTH_PASS = 'adminc6';// смените на свой; пустой AUTH_USER = вход без пароля для всех
+const AUTH_PASS = 'c6d981';// смените на свой; пустой AUTH_USER = вход без пароля для всех
 const ALLOW_IPS = [];                // доп. разрешённые IP, например ['203.0.113.7']
 
 // ── Блокировка IP через ваш API (iptables). Ключ хранится только здесь, в браузер не передаётся.
-const BLOCK_API_URL     = 'https://mydomain.com/murkirsecurity_v4/API/iptables.php';
+const BLOCK_API_URL     = 'https://mysite.com/murkirsecurity_v4/API/iptables.php';
 const BLOCK_API_KEY     = ''; // пустая строка — блокировка через API выключена
 const BLOCK_API_METHOD  = 'POST';    // POST — ключ не попадает в access-лог; можно 'GET'
 const BLOCK_API_UNBLOCK = 'unblock'; // как называется действие разблокировки в вашем API ('' — кнопки «Разблокировать» не будет)
@@ -43,12 +43,22 @@ const HIDE_SELF         = true;      // не показывать в логах 
 const AUTOBAN_MODE   = 'watch';      // 'off' — выключена, 'watch' — только записывает, кого заблокировала бы, 'ban' — блокирует.
                                      // Режим можно переключить и на странице — это настройка по умолчанию.
 const AUTOBAN_WINDOW = 600;          // окно анализа, секунд
-const AUTOBAN_RULES  = [
-    'scan'   => ['on' => true, 'hits' => 2,    'timeout' => 86400,  'title' => 'Сканер уязвимостей',     'desc' => 'запросы к /.env, /wp-login.php, /phpmyadmin… — от {hits} за 10 мин (опасные вроде /.env и /.git — сразу)'],
-    'flood'  => ['on' => true, 'per_min' => 120, 'timeout' => 3600, 'title' => 'Флуд',                   'desc' => 'больше {per_min} запросов страниц в минуту с одного IP (картинки и стили не считаются)'],
-    'fake'   => ['on' => true,                 'timeout' => 86400,  'title' => 'Поддельный поисковик',   'desc' => 'представляется Googlebot / YandexBot…, но обратный DNS указывает на чужой домен'],
-    'e404'   => ['on' => true, 'hits' => 60, 'share' => 0.8, 'timeout' => 21600, 'title' => 'Перебор адресов', 'desc' => 'от {hits} ответов 404 за 10 мин, и это больше {share_pct}% его запросов'],
-    'badbot' => ['on' => true, 'bots' => ['Сканер уязвимостей'], 'timeout' => 86400, 'title' => 'Вредный бот', 'desc' => 'User-Agent из списка: {bots}'],
+const AUTOBAN_RULES  = [   // числа (пороги и сроки) можно менять и прямо на странице, в таблице «Правила»
+    'inject' => ['on' => true, 'hits' => 1,    'timeout' => 604800, 'title' => '💉 Атака на сайт',         'desc' => 'SQL-инъекции, XSS, чтение файлов (../../etc/passwd), запуск команд, Log4Shell — в адресе, User-Agent или Referer; от {hits} запроса'],
+    'scan'   => ['on' => true, 'hits' => 2,    'timeout' => 86400,  'title' => '🔍 Сканер уязвимостей',    'desc' => 'запросы к /.env, /wp-login.php, /phpmyadmin, бэкапам, шеллам… — от {hits} за 10 мин (опасные вроде /.env и /.git — сразу)'],
+    'probe'  => ['on' => true, 'hits' => 3,    'timeout' => 86400,  'title' => '📡 Зондирование сервера',  'desc' => 'CONNECT и чужие адреса (ищут открытый прокси), PUT / DELETE / PROPFIND, двоичный мусор вместо запроса — от {hits} баллов за 10 мин'],
+    'brute'  => ['on' => true, 'hits' => 20, 'h401' => 10, 'timeout' => 21600, 'title' => '🔑 Подбор пароля', 'desc' => 'от {hits} попыток входа (POST на /admin.php, ?do=login, ?do=register…) или от {h401} ответов 401 за 10 мин — в том числе к этой панели'],
+    'badbot' => ['on' => true, 'bots' => ['Сканер уязвимостей'], 'timeout' => 86400, 'title' => '☠️ Вредный бот', 'desc' => 'User-Agent из списка: {bots}'],
+    'fake'   => ['on' => true,                 'timeout' => 86400,  'title' => '🎭 Поддельный поисковик',  'desc' => 'представляется Googlebot / YandexBot…, но обратный DNS указывает на чужой домен'],
+    'flood'  => ['on' => true, 'per_min' => 120, 'timeout' => 3600, 'title' => '🌊 Флуд',                  'desc' => 'больше {per_min} запросов страниц в минуту с одного IP (картинки и стили не считаются)'],
+    'post'   => ['on' => true, 'per_min' => 30, 'timeout' => 3600,  'title' => '✉️ Спам формами',          'desc' => 'больше {per_min} POST-запросов в минуту (комментарии, регистрация, обратная связь)'],
+    'crawl'  => ['on' => true, 'hits' => 400,  'timeout' => 3600,   'title' => '🕷 Агрессивный парсер',    'desc' => 'от {hits} страниц за 10 мин с одного IP — без резких пиков, но и без остановки'],
+    'e404'   => ['on' => true, 'hits' => 60, 'share' => 0.8, 'timeout' => 21600, 'title' => '🧭 Перебор адресов', 'desc' => 'от {hits} ответов 404 за 10 мин, и это больше {share_pct}% его запросов'],
+    'denied' => ['on' => true, 'hits' => 40, 'share' => 0.8, 'timeout' => 21600, 'title' => '🚪 Ломится в закрытое', 'desc' => 'от {hits} ответов 403 / 429 / 444 за 10 мин, и это больше {share_pct}% его запросов'],
+    'noua'   => ['on' => true, 'hits' => 30,   'timeout' => 3600,   'title' => '👻 Без User-Agent',        'desc' => 'от {hits} запросов страниц за 10 мин вообще без User-Agent'],
+    'uarot'  => ['on' => true, 'uas' => 15,    'timeout' => 3600,   'title' => '🥸 Смена масок',           'desc' => 'от {uas} разных User-Agent с одного IP за 10 мин, при этом картинки и стили почти не загружаются'],
+    'score'  => ['on' => true, 'points' => 100, 'timeout' => 21600, 'title' => '🧮 Сумма признаков',       'desc' => 'по отдельности признаки слабые, но вместе набирают от {points} баллов: сканирование, много 404, скрипт вместо браузера, древний браузер, не грузит картинки, нет переходов по ссылкам, высокий темп…'],
+    'subnet' => ['on' => true, 'ips' => 5,     'timeout' => 21600,  'title' => '🕸 Атака подсетью',        'desc' => 'от {ips} нарушителей из одной подсети /24 (IPv6 — /64) за час — блокируется вся подсеть'],
 ];
 const AUTOBAN_MAX_PER_HOUR = 60;     // предохранитель: не больше стольких банов в час
 const AUTOBAN_REPEAT_X2    = true;   // повторный нарушитель (за 7 дней) — срок ×2 за каждый прошлый бан, до 30 дней
@@ -696,15 +706,29 @@ function requireCsrf(): void
 
 // ───────────── 🤖 Автозащита ─────────────
 const SCAN_CRITICAL_RE = '~/\.(env|git/|svn/|aws/|ssh/|htpasswd)|eval-stdin|/etc/passwd|\.\./\.\./|%2e%2e%2f|/(alfa|wso|c99|r57)\w*\.php|union[\s+]+select|<script~i';
-const SCAN_RE_PHP = '~/wp-(login|admin|content|includes|config)|xmlrpc\.php|wlwmanifest|/\.(env|git|svn|aws|ssh|htpasswd|DS_Store|vscode)|phpmyadmin|/pma/|/myadmin|/vendor/phpunit|eval-stdin|/cgi-bin/|/boaform|/HNAP1|/actuator|/solr/|/owa/|/etc/passwd|\.\./|%2e%2e|<script|union[\s+]+select|/shell\.php|/(backup|dump|db|database|site)\.(sql|zip|tar|gz|rar)|/telescope|/_profiler|/server-status|/setup\.php|/sftp-config|/config\.(json|yml|yaml)|/info\.php|/phpinfo|/(alfa|wso|c99|r57)\w*\.php|/autodiscover~i';
+const SCAN_RE_PHP = '~/wp-(login|admin|content|includes|config|json)|xmlrpc\.php|wlwmanifest|/\.(env|git|svn|hg|aws|ssh|htpasswd|DS_Store|vscode|idea|docker|kube|npmrc|bash_history)|phpmyadmin|/pma/|/myadmin|/adminer|/vendor/phpunit|eval-stdin|/cgi-bin/|/boaform|/HNAP1|/GponForm|/goform/|/actuator|/solr/|/owa/|/ecp/|/manager/html|/jenkins|/druid/|/nacos/|/geoserver|/_ignition|/debug/default|/etc/passwd|\.\./|%2e%2e|<script|union[\s+]+select|/(shell|cmd|filemanager|fm|mini|x|xx|1|0|ws|gel4y|radio|lock360|bypass)\.php\d?(\?|$)|/(backup|dump|db|database|site|www|html|public_html|old|bak)\.(sql|zip|tar|gz|tgz|rar|7z|bak)|\.(sql|bak|old|orig|save|swp)(\.gz)?(\?|$)|/telescope|/_profiler|/server-(status|info)|/setup\.php|/install\.php|/sftp-config|/config\.(json|yml|yaml|php\.bak|inc)|/(composer|package)\.(json|lock)|/docker-compose|/Dockerfile|/web\.config|/info\.php|/phpinfo|/(alfa|wso|c99|r57|b374k)\w*\.php|/autodiscover|/remote/login|/dana-na/|/sdk$|/evox/|/stalker_portal|/ReportServer|/\.well-known/[^?]*\.php|/(id_rsa|id_dsa)(\.\w+)?(\?|$)~i';
 const STATIC_RE_PHP = '~\.(css|js|mjs|map|png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|eot|otf|mp4|webm|mp3)(\?|$)~i';
+// Атаки в адресе: SQL-инъекции, XSS, чтение файлов, запуск команд
+const INJECT_RE = '~union[\s+/*]+(all[\s+/*]+)?select|information_schema|\b(sleep|benchmark|pg_sleep|load_file|extractvalue|updatexml|concat_ws|group_concat)\(|waitfor[\s+]+delay|into[\s+]+(out|dump)file|[\'"][\s+]*(or|and)[\s+]+[\'"]?\d+[\'"]?[\s+]*=[\s+]*[\'"]?\d|;[\s+]*(drop|insert|update|delete)[\s+]+|<script|javascript:|\bon(error|load|mouseover|focus)[\s+]*=|<(svg|iframe|img)[\s+/][^&]*=|\.\./\.\./|\.\.\\\\\.\.|/etc/(passwd|shadow|hosts)|/proc/self|c:[/\\\\]+windows|(php|zip|phar|expect|glob)://|data:text/|\b(base64_decode|eval|passthru|shell_exec|proc_open|popen|system|assert|phpinfo|file_put_contents|fromCharCode)\(|\$\{jndi:|\$\{(env|sys|lower|upper):|\(\)[\s+]*\{|[;|`][\s+]*(wget|curl|uname|nc|bash|sh|python\d?|perl|powershell)\b|\$\((wget|curl|id|whoami)|/bin/(ba)?sh|cmd\.exe|allow_url_include|auto_prepend_file|%00|%0d%0a(set-cookie|location)~i';
+const INJECT_HDR_RE = '~\$\{jndi:|\$\{(env|sys|lower|upper):|\(\)\s*\{\s*[:;]|<\?php|union\s+select|<script|/bin/(ba)?sh|;\s*(wget|curl)\s~i';   // в User-Agent и Referer
+const LOGIN_RE = '~^/admin\.php(\?mod=main)?$|[?&]do=(login|lostpassword|register)|[?&](action|mod)=(login|lostpassword|register)|/wp-login\.php|/xmlrpc\.php|/administrator/(index\.php)?(\?|$)|/user/login|/(login|signin|sign-in|auth|account/login)(\.php|/)?(\?|$)~i';
+const OLD_UA_RE = '~Chrome/([1-9]|[1-7]\d)\.|Firefox/([1-9]|[1-5]\d)\.|MSIE ([1-9]|10)\.|Windows NT 5\.|Windows (9[58]|CE)|Android [1-4]\.|Opera/[1-9]\.~';
+const LIB_UA_RE = '~python|curl/|wget|Go-http-client|Java/|libwww|okhttp|aiohttp|httpx|scrapy|node-fetch|axios|undici|Apache-HttpClient|Guzzle|^PHP|Ruby|perl|HeadlessChrome|PhantomJS|Puppeteer|Playwright|Selenium|colly|fasthttp|restsharp|WinHttp|Embarcadero|Indy Library~i';
+const AB_HARD = ['inject', 'scan', 'probe', 'brute', 'fake'];       // от этих правил User-Agent «полезного бота» не спасает
+// минутная корзина IP: 0 запросы, 1 сканер, 2 «404», 3 страницы, 4 POST, 5 входы, 6 атаки, 7 зондирование, 8 отказы, 9 статика, 10 «401», 11 без UA
+const AB_N = 12;
 
 function autobanSettings(): array
 {
     $s = storeRead('autoban_settings');
     $mode = in_array($s['mode'] ?? '', ['off', 'watch', 'ban'], true) ? $s['mode'] : AUTOBAN_MODE;
     $rules = AUTOBAN_RULES;
-    foreach ($rules as $k => &$r) if (isset($s['rules'][$k])) $r['on'] = (bool)$s['rules'][$k];
+    foreach ($rules as $k => &$r) {
+        if (isset($s['rules'][$k])) $r['on'] = (bool)$s['rules'][$k];
+        foreach ($s['params'][$k] ?? [] as $pk => $pv) {
+            if (isset($r[$pk]) && $pk !== 'on' && (is_int($r[$pk]) || is_float($r[$pk]))) $r[$pk] = is_int($r[$pk]) ? (int)$pv : (float)$pv;
+        }
+    }
     return ['mode' => $mode, 'rules' => $rules];
 }
 function autobanJournal(array $add = []): array
@@ -727,8 +751,15 @@ function rememberAdmin(string $ip): void
         return array_filter($a, fn($t) => $t > time() - 30 * 86400);
     });
 }
+/** Подсеть IP для правила «Атака подсетью»: /24 для IPv4, /64 для IPv6 */
+function subnetOfIp(string $ip): string
+{
+    $b = @inet_pton($ip);
+    if ($b === false) return '';
+    return strlen($b) === 4 ? inet_ntop(substr($b, 0, 3) . "\0") . '/24' : inet_ntop(substr($b, 0, 8) . str_repeat("\0", 8)) . '/64';
+}
 /** Почему автозащите нельзя трогать IP ('' — можно) */
-function autobanWhitelist(string $ip, array $x): string
+function autobanWhitelist(string $ip, array $x, string $rule, int &$lookups): string
 {
     if (isLocalIp($ip)) return 'локальный адрес';
     if (in_array($ip, serverIps(), true)) return 'IP этого сервера';
@@ -737,31 +768,121 @@ function autobanWhitelist(string $ip, array $x): string
         if ($p !== '' && ($p === $ip || (str_contains($p, '/') && ipInCidr($ip, $p)))) return 'в списке защищённых';
     }
     if (isset(storeRead('admins')[$ip])) return 'с этого IP открывали панель логов (это вы)';
-    if (in_array($x['n'] ?? '', AUTOBAN_SKIP_BOTS, true)) return 'полезный бот: ' . $x['n'];
-    if (($x['k'] ?? '') === 'search' && isset(VERIFY_DOMAINS[$x['n'] ?? ''])) {
-        if (verifyBot($x['n'], $ip, false)['res'] === 'ok') return 'подтверждённый ' . $x['n'];
+    $hard = in_array($rule, AB_HARD, true);
+    // «полезный бот» определяется только по User-Agent, который легко подделать, — поэтому он защищает лишь от правил «по количеству»
+    if (!$hard && count($x['u'] ?? []) <= 3 && in_array($x['n'] ?? '', AUTOBAN_SKIP_BOTS, true)) return 'полезный бот: ' . $x['n'];
+    foreach (array_keys($x['sb'] ?? []) as $bot) {
+        $v = verifyBot((string)$bot, $ip, $lookups < 15);
+        if (empty($v['t']) || $v['t'] > time() - 5) $lookups++;
+        if ($v['res'] === 'ok') return 'подтверждённый ' . $bot;
+        if (!$hard && $v['res'] !== 'fake') return "{$bot}: обратный DNS пока не проверен — не трогаю";
     }
     return '';
 }
-function autobanCheck(string $ip, array $x, array $rules, int &$lookups): ?array
+/** Разбирает одну строку лога в признаки IP. 0 — не учтена, 1 — учтена, 2 — учтена и это статика из браузера */
+function autobanFeed(array &$x, array $e, bool $self): int
 {
-    $req = $scan = $n404 = $pages = 0; $peak = 0;
-    foreach ($x['m'] as $b) { $req += $b[0]; $scan += $b[1]; $n404 += $b[2]; $pages += $b[3]; $peak = max($peak, $b[3]); }
-    $r = $rules['scan'];
-    if ($r['on'] && $scan >= $r['hits']) return ['scan', "сканер: {$scan} подозр. запрос(ов), например " . ($x['ex'] ?? ''), $r['timeout']];
-    $r = $rules['badbot'];
-    if ($r['on'] && in_array($x['n'] ?? '', $r['bots'], true)) return ['badbot', 'вредный бот: ' . $x['n'], $r['timeout']];
-    $r = $rules['flood'];
-    if ($r['on'] && $peak >= $r['per_min']) return ['flood', "флуд: {$peak} страниц в минуту", $r['timeout']];
-    $r = $rules['e404'];
-    if ($r['on'] && $n404 >= $r['hits'] && $req && $n404 / $req >= $r['share']) return ['e404', "перебор адресов: {$n404} ответов 404 из {$req}", $r['timeout']];
-    $r = $rules['fake'];
-    if ($r['on'] && ($x['k'] ?? '') === 'search' && isset(VERIFY_DOMAINS[$x['n'] ?? ''])) {
-        $v = verifyBot($x['n'], $ip, $lookups < 15);
-        if ($v['res'] !== 'pending') $lookups++;
-        if ($v['res'] === 'fake') return ['fake', "представляется {$x['n']}, а rDNS: " . ($v['host'] ?: 'нет'), $r['timeout']];
+    $min = (string)intdiv($e['t'], 60);
+    $b = ($x['m'][$min] ?? []) + array_fill(0, AB_N, 0);
+    if ($self) {                                       // запросы к самой панели не считаем — кроме неверного пароля
+        if ($e['s'] !== 401) return 0;
+        $b[10]++; $x['ex']['brute'] = 'неверный пароль к панели логов';
+        $x['m'][$min] = $b; $x['last'] = $e['t']; $x['n'] ??= $e['n']; $x['k'] ??= $e['k'];
+        return 1;
     }
-    return null;
+    $p = $e['p']; $m = $e['m']; $ua = $e['ua']; $s = $e['s'];
+    $hay = ($e['raw'] ?? '') !== '' ? $p . ' ' . $e['raw'] : $p;
+    $ex = function (string $k) use (&$x, $m, $p): void { $x['ex'][$k] = mb_substr(($m !== '' && $m !== 'GET' ? $m . ' ' : '') . $p, 0, 110); };
+    $static = $m !== 'POST' && preg_match(STATIC_RE_PHP, $p);
+    $b[0]++;
+    $b[$static ? 9 : 3]++;
+    if (preg_match(INJECT_RE, $hay) || (($ua !== '' || $e['r'] !== '') && preg_match(INJECT_HDR_RE, $ua . ' ' . $e['r']))) {
+        $b[6]++; $ex('inject');
+        if (!preg_match(INJECT_RE, $hay)) $x['ex']['inject'] = 'в заголовке: ' . mb_substr(preg_match(INJECT_HDR_RE, $ua) ? $ua : $e['r'], 0, 90);
+    }
+    if (preg_match(SCAN_RE_PHP, $hay)) { $b[1] += preg_match(SCAN_CRITICAL_RE, $hay) ? 2 : 1; $ex('scan'); }
+    $w = 0;
+    if ($m === '') { if ($p !== '' && $p !== '-' && $s >= 400) $w = 1; }                    // двоичный мусор, TLS на порт HTTP
+    elseif ($m === 'CONNECT') $w = 3;
+    elseif (!in_array($m, ['GET', 'POST', 'HEAD', 'OPTIONS'], true)) $w = 1;
+    elseif (preg_match('~^https?://([^/:?]+)~i', $p, $hm) && strcasecmp($hm[1], preg_replace('~^www\.~', '', $e['v'])) !== 0 && strcasecmp($hm[1], $e['v']) !== 0) $w = 2;   // ищут открытый прокси
+    if ($w) { $b[7] += $w; $ex('probe'); if ($m === '') $x['ex']['probe'] = 'мусор вместо запроса'; }
+    if ($m === 'POST') { $b[4]++; if (preg_match(LOGIN_RE, $p)) { $b[5]++; $ex('brute'); } }
+    if ($s === 401) { $b[10]++; $x['ex']['brute'] ??= mb_substr($p, 0, 110) . ' → 401'; }
+    if ($s === 404) $b[2]++;
+    elseif (in_array($s, [400, 403, 405, 429, 444], true)) $b[8]++;
+    if ($ua === '') { if (!$static) $b[11]++; }
+    else {
+        if (count($x['u'] ?? []) < 80) $x['u'][dechex(crc32($ua))] = 1;
+        if ($e['k'] === 'search' && isset(VERIFY_DOMAINS[$e['n']]) && count($x['sb'] ?? []) < 4) $x['sb'][$e['n']] = 1;
+        if ($e['k'] === 'browser' && preg_match(OLD_UA_RE, $ua)) $x['old'] = 1;
+        if (preg_match(LIB_UA_RE, $ua)) $x['lib'] = 1;
+    }
+    if ($e['r'] !== '') $x['ref'] = 1;
+    $x['m'][$min] = $b;
+    $x['n'] = $e['n']; $x['k'] = $e['k']; $x['ua'] = mb_substr($ua, 0, 200); $x['last'] = $e['t'];
+    return $static && $e['k'] === 'browser' ? 2 : 1;
+}
+/** Применяет правила к IP. Возвращает [правило, почему, срок, баллы] самого строгого сработавшего правила или null */
+function autobanCheck(string $ip, array $x, array $rules, int &$lookups, bool $staticLogged): ?array
+{
+    $t = array_fill(0, AB_N, 0); $peak = $peakPost = 0;
+    foreach ($x['m'] as $b) {
+        foreach ($b as $i => $v) if ($i < AB_N) $t[$i] += $v;
+        $peak = max($peak, $b[3] ?? 0); $peakPost = max($peakPost, $b[4] ?? 0);
+    }
+    [$req, $scan, $n404, $pages, , $login, $inj, $probe, $denied, $static, $n401, $noua] = $t;
+    $uas = count($x['u'] ?? []); $ex = $x['ex'] ?? []; $isBrowser = ($x['k'] ?? '') === 'browser';
+    $eg = fn(string $k) => isset($ex[$k]) ? ', например: ' . $ex[$k] : '';
+    $on = fn(string $k) => !empty($rules[$k]['on']);
+    $hits = [];
+    $hit = function (string $k, string $why) use (&$hits, $rules) { $hits[] = [$k, $why, (int)$rules[$k]['timeout']]; };
+
+    if ($on('inject') && $inj >= $rules['inject']['hits']) $hit('inject', "атака на сайт: {$inj} запрос(ов)" . $eg('inject'));
+    if ($on('scan') && $scan >= $rules['scan']['hits']) $hit('scan', "сканер: {$scan} подозр. запрос(ов)" . $eg('scan'));
+    if ($on('probe') && $probe >= $rules['probe']['hits']) $hit('probe', 'зондирование сервера' . $eg('probe'));
+    if ($on('brute') && ($login >= $rules['brute']['hits'] || $n401 >= $rules['brute']['h401'])) $hit('brute', "подбор пароля: попыток входа {$login}, ответов 401 — {$n401}" . $eg('brute'));
+    if ($on('badbot') && in_array($x['n'] ?? '', $rules['badbot']['bots'], true)) $hit('badbot', 'вредный бот: ' . $x['n']);
+    if ($on('flood') && $peak >= $rules['flood']['per_min']) $hit('flood', "флуд: {$peak} страниц в минуту");
+    if ($on('post') && $peakPost >= $rules['post']['per_min']) $hit('post', "спам формами: {$peakPost} POST-запросов в минуту");
+    if ($on('crawl') && $pages >= $rules['crawl']['hits']) $hit('crawl', "агрессивный парсер: {$pages} страниц за " . intdiv(AUTOBAN_WINDOW, 60) . ' мин');
+    if ($on('e404') && $n404 >= $rules['e404']['hits'] && $n404 / $req >= $rules['e404']['share']) $hit('e404', "перебор адресов: {$n404} ответов 404 из {$req}");
+    if ($on('denied') && $denied >= $rules['denied']['hits'] && $denied / $req >= $rules['denied']['share']) $hit('denied', "ломится в закрытое: {$denied} отказов (403/429/444) из {$req}");
+    if ($on('noua') && $noua >= $rules['noua']['hits']) $hit('noua', "{$noua} запросов без User-Agent");
+    $noStatic = $staticLogged && $static * 10 < $pages;                       // картинки/стили почти не грузит
+    if ($on('uarot') && $uas >= $rules['uarot']['uas'] * ($staticLogged ? 1 : 2) && ($noStatic || !$staticLogged)) $hit('uarot', "смена масок: {$uas} разных User-Agent с одного IP");
+    if ($on('fake')) foreach (array_keys($x['sb'] ?? []) as $bot) {
+        $v = verifyBot((string)$bot, $ip, $lookups < 15);
+        if (empty($v['t']) || $v['t'] > time() - 5) $lookups++;
+        if ($v['res'] === 'fake') { $hit('fake', "представляется {$bot}, а rDNS: " . ($v['host'] ?: 'нет')); break; }
+    }
+    // сумма слабых признаков
+    $sig = [];
+    if ($scan) $sig['сканирование'] = min(80, 40 * $scan);
+    if ($inj) $sig['атака в адресе'] = 60;
+    if ($probe) $sig['зондирование'] = min(75, 25 * $probe);
+    if ($login + $n401 >= 3) $sig['попытки входа'] = min(60, 4 * ($login + $n401));
+    if ($n404 >= 15 && $n404 / $req >= 0.3) $sig["много 404 ({$n404})"] = 35;
+    if ($denied >= 15) $sig["много отказов ({$denied})"] = 25;
+    if ($noua >= 5) $sig['нет User-Agent'] = 30;
+    if (!empty($x['lib']) && $pages >= 20) $sig['скрипт, а не браузер'] = 30;
+    if (!empty($x['old'])) $sig['древний браузер'] = 25;
+    if ($isBrowser && $pages >= 30 && $staticLogged && $static === 0) $sig['не грузит картинки и стили'] = 30;
+    if ($pages >= 30 && empty($x['ref'])) $sig['ни одного перехода по ссылке'] = 20;
+    if ($peak >= max(10, intdiv((int)$rules['flood']['per_min'], 2))) $sig["{$peak} страниц в минуту"] = 30;
+    if ($peakPost >= max(5, intdiv((int)$rules['post']['per_min'], 2))) $sig["{$peakPost} POST в минуту"] = 20;
+    if ($uas >= 5) $sig["{$uas} разных User-Agent"] = 20;
+    $score = array_sum($sig);
+    if ($on('score') && count($sig) >= 2 && $score >= $rules['score']['points']) {
+        arsort($sig);
+        $hit('score', "подозрительность {$score} баллов: " . implode(' + ', array_map(fn($k, $v) => "{$k} {$v}", array_keys($sig), $sig)));
+    }
+    if (!$hits) return null;
+    usort($hits, fn($a, $b) => $b[2] <=> $a[2]);                              // главное — правило с самым долгим сроком
+    $best = $hits[0];
+    if (count($hits) > 1) $best[1] .= ' · ещё: ' . implode(', ', array_map(fn($h) => $rules[$h[0]]['title'], array_slice($hits, 1)));
+    $best[3] = $score;
+    return $best;
 }
 /** Один проход автозащиты: читает новые строки логов, применяет правила, блокирует */
 function runAutoban(string $trigger): array
@@ -773,7 +894,7 @@ function runAutoban(string $trigger): array
     $t0 = microtime(true); $now = time();
     $st = storeRead('autoban_state', ['files' => [], 'ips' => []]);
     $logs = discoverLogs(); $lines = 0; $newIps = [];
-    $fw = null;
+    $fw = null; $selfName = '/' . basename(__FILE__);
     foreach ($logs as $key => $l) {
         if (!$l['readable'] || !empty($st['files'][$key]['x'])) continue;
         $file = $l['path']; clearstatcache(true, $file);
@@ -789,25 +910,13 @@ function runAutoban(string $trigger): array
             $e = parseLine($line);
             if ($e === null) continue;
             $parsed++;
-            if ($e['t'] < $now - AUTOBAN_WINDOW || (HIDE_SELF && SELF_PATH !== '' && str_starts_with($e['p'], SELF_PATH))) continue;
+            if ($e['t'] < $now - AUTOBAN_WINDOW) continue;
             $ip = normIp($e['ip']); if ($ip === '') continue;
-            $x = &$st['ips'][$ip];
-            $x ??= ['m' => []];
-            $min = (string)intdiv($e['t'], 60);
-            $b = $x['m'][$min] ?? [0, 0, 0, 0];
-            $b[0]++;
-            $path = $e['p'] . ' ' . $e['m'];
-            if (preg_match(SCAN_RE_PHP, $e['p']) || preg_match(SCAN_RE_PHP, $e['raw'] ?? '')) {
-                $b[1] += preg_match(SCAN_CRITICAL_RE, $e['p']) || preg_match(SCAN_CRITICAL_RE, $e['raw'] ?? '') ? 2 : 1;
-                $x['ex'] = mb_substr($e['p'], 0, 120);
-            }
-            if ($e['s'] === 404) $b[2]++;
-            if (!preg_match(STATIC_RE_PHP, $e['p'])) $b[3]++;
-            $x['m'][$min] = $b;
-            $x['n'] = $e['n']; $x['k'] = $e['k']; $x['ua'] = mb_substr($e['ua'], 0, 200); $x['last'] = $e['t'];
-            $newIps[$ip] = true;
-            unset($x);
-            $lines++;
+            $x = $st['ips'][$ip] ?? ['m' => []];
+            $res = autobanFeed($x, $e, str_ends_with(explode('?', $e['p'], 2)[0], $selfName));
+            if (!$res) continue;
+            if ($res === 2) $st['static'] = $now;
+            $st['ips'][$ip] = $x; $newIps[$ip] = true; $lines++;
         }
         if (!$parsed && count($arr) > 20 && $off === 0) $st['files'][$key]['x'] = 1;          // не access-лог
     }
@@ -822,40 +931,72 @@ function runAutoban(string $trigger): array
     $journal = autobanJournal(); $add = []; $lookups = 0;
     $bansHour = count(array_filter($journal, fn($j) => $j['act'] === 'ban' && $j['t'] > $now - 3600));
     $active = blockStore();
-    foreach ($st['ips'] as $ip => &$x) {
-        if (!isset($newIps[$ip]) || ($x['done'] ?? 0) > $now - AUTOBAN_WINDOW) continue;
-        $hit = autobanCheck((string)$ip, $x, $cfg['rules'], $lookups);
-        if (!$hit) continue;
-        [$rule, $why, $timeout] = $hit;
-        $x['done'] = $now;
-        $rec = ['t' => $now, 'ip' => (string)$ip, 'rule' => $rule, 'why' => $why, 'n' => $x['n'] ?? '', 'k' => $x['k'] ?? '', 'by' => $trigger];
-        if (($wl = autobanWhitelist((string)$ip, $x)) !== '') { $add[] = $rec + ['act' => 'skip', 'note' => $wl]; continue; }
-        if (isset($active[$ip]) && ($active[$ip]['until'] ?? 0) > $now) { $add[] = $rec + ['act' => 'skip', 'note' => 'уже заблокирован']; continue; }
+    $staticLogged = ($st['static'] ?? 0) > $now - 86400;
+    // общий исполнитель: IP или подсеть
+    $punish = function (string $target, array $rec, int $timeout) use (&$add, &$bansHour, &$fw, $journal, $active, $cfg, $now): void {
+        if (isset($active[$target]) && ($active[$target]['until'] ?? 0) > $now) { $add[] = $rec + ['act' => 'skip', 'note' => 'уже заблокирован']; return; }
         $fw ??= blockEnabled() ? fwList() : ['list' => []];
         foreach ($fw['list'] ?? [] as $fe) {
-            if ($fe['ip'] === $ip || (str_contains($fe['ip'], '/') && ipInCidr((string)$ip, $fe['ip']))) { $add[] = $rec + ['act' => 'skip', 'note' => 'уже в iptables: ' . $fe['ip']]; continue 2; }
+            if ($fe['ip'] === $target || (str_contains($fe['ip'], '/') && !str_contains($target, '/') && ipInCidr($target, $fe['ip']))) { $add[] = $rec + ['act' => 'skip', 'note' => 'уже в iptables: ' . $fe['ip']]; return; }
         }
         if (AUTOBAN_REPEAT_X2) {
-            $prev = count(array_filter($journal, fn($j) => $j['ip'] === (string)$ip && $j['act'] === 'ban' && $j['t'] > $now - 7 * 86400));
+            $prev = count(array_filter($journal, fn($j) => $j['ip'] === $target && $j['act'] === 'ban' && $j['t'] > $now - 7 * 86400));
             if ($prev) { $timeout = min(2592000, $timeout * (2 ** $prev)); $rec['why'] .= " · повторно ({$prev}), срок ×" . (2 ** $prev); }
         }
         $rec['timeout'] = $timeout;
-        if ($cfg['mode'] === 'watch') { $add[] = $rec + ['act' => 'watch']; continue; }
-        if (!blockEnabled()) { $add[] = $rec + ['act' => 'error', 'note' => 'не настроен BLOCK_API_KEY']; continue; }
-        if ($bansHour >= AUTOBAN_MAX_PER_HOUR) { $add[] = $rec + ['act' => 'limit', 'note' => 'предохранитель: ' . AUTOBAN_MAX_PER_HOUR . ' банов в час']; continue; }
-        $r = blockApiCall('block', (string)$ip, $timeout);
+        if ($cfg['mode'] === 'watch') { $add[] = $rec + ['act' => 'watch']; return; }
+        if (!blockEnabled()) { $add[] = $rec + ['act' => 'error', 'note' => 'не настроен BLOCK_API_KEY']; return; }
+        if ($bansHour >= AUTOBAN_MAX_PER_HOUR) { $add[] = $rec + ['act' => 'limit', 'note' => 'предохранитель: ' . AUTOBAN_MAX_PER_HOUR . ' банов в час']; return; }
+        $r = blockApiCall('block', $target, $timeout);
         if ($r['ok']) {
             $bansHour++;
-            blockStore(function ($d) use ($ip, $timeout, $rec) {
-                $d[$ip] = ['ip' => (string)$ip, 'at' => time(), 'until' => time() + $timeout, 'timeout' => $timeout, 'reason' => '🤖 ' . $rec['why'], 'by' => 'автозащита'];
+            blockStore(function ($d) use ($target, $timeout, $rec) {
+                $d[$target] = ['ip' => $target, 'at' => time(), 'until' => time() + $timeout, 'timeout' => $timeout, 'reason' => '🤖 ' . $rec['why'], 'by' => 'автозащита'];
                 return $d;
             });
             $add[] = $rec + ['act' => 'ban', 'note' => mb_substr($r['resp'], 0, 200)];
         } else {
             $add[] = $rec + ['act' => 'error', 'note' => mb_substr($r['err'] ?: ('HTTP ' . $r['code'] . ': ' . $r['resp']), 0, 200)];
         }
+    };
+    foreach ($st['ips'] as $ip => &$x) {
+        $ip = (string)$ip;
+        if (!isset($newIps[$ip]) || ($x['done'] ?? 0) > $now - AUTOBAN_WINDOW) continue;
+        $hit = autobanCheck($ip, $x, $cfg['rules'], $lookups, $staticLogged);
+        if (!$hit) continue;
+        [$rule, $why, $timeout, $score] = $hit;
+        $x['done'] = $now;
+        $rec = ['t' => $now, 'ip' => $ip, 'rule' => $rule, 'why' => $why, 'n' => $x['n'] ?? '', 'k' => $x['k'] ?? '', 'by' => $trigger, 'sc' => $score];
+        if (($wl = autobanWhitelist($ip, $x, $rule, $lookups)) !== '') { $add[] = $rec + ['act' => 'skip', 'note' => $wl]; continue; }
+        $punish($ip, $rec, $timeout);
     }
     unset($x);
+    // атака подсетью: несколько нарушителей из одной /24 (/64) за час → блокируем подсеть целиком
+    $r = $cfg['rules']['subnet'] ?? ['on' => false];
+    if ($r['on']) {
+        $nets = []; $fresh = []; $seen = [];
+        foreach (array_merge($journal, $add) as $j) {
+            if ($j['t'] <= $now - 3600) continue;
+            if (str_contains($j['ip'], '/')) { $seen[$j['ip']] = true; continue; }
+            if (!in_array($j['act'], ['ban', 'watch', 'limit'], true)) continue;
+            $net = subnetOfIp($j['ip']);
+            if ($net === '') continue;
+            $nets[$net][$j['ip']] = true;
+            if ($j['t'] === $now) $fresh[$net] = true;
+        }
+        foreach ($nets as $net => $ips) {
+            $net = (string)$net;
+            if (count($ips) < $r['ips'] || !isset($fresh[$net]) || isset($seen[$net])) continue;
+            $rec = ['t' => $now, 'ip' => $net, 'rule' => 'subnet', 'why' => 'атака подсетью: ' . count($ips) . ' нарушителей за час (' . implode(', ', array_slice(array_keys($ips), 0, 4)) . (count($ips) > 4 ? '…' : '') . ')', 'n' => '', 'k' => '', 'by' => $trigger];
+            $wl = protectCidr($net, '');
+            if ($wl === '') foreach (array_keys(storeRead('admins')) as $a) if (ipInCidr((string)$a, $net)) { $wl = 'в подсети ваш IP ' . $a; break; }
+            if ($wl === '') foreach (storeRead('rdns') as $ck => $v) {
+                if (($v['res'] ?? '') === 'ok' && ipInCidr(substr((string)$ck, (int)strpos((string)$ck, '|') + 1), $net)) { $wl = 'в подсети подтверждённый поисковик'; break; }
+            }
+            if ($wl !== '') { $add[] = $rec + ['act' => 'skip', 'note' => $wl]; continue; }
+            $punish($net, $rec, (int)$r['timeout']);
+        }
+    }
     if ($add) { autobanJournal($add); if (array_filter($add, fn($a) => $a['act'] === 'ban')) storeWrite('fwcache', []); }
     $st['last'] = $now; $st['trigger'] = $trigger;
     storeWrite('autoban_state', $st);
@@ -880,7 +1021,7 @@ if ($api === 'autoban') {
     $st = storeRead('autoban_state');
     $cfg = autobanSettings();
     $user = function_exists('posix_geteuid') ? (posix_getpwuid(posix_geteuid())['name'] ?? '') : '';
-    json(['mode' => $cfg['mode'], 'rules' => $cfg['rules'], 'last' => storeRead('autoban_last'), 'journal' => array_slice(autobanJournal(), -400),
+    json(['mode' => $cfg['mode'], 'rules' => $cfg['rules'], 'defaults' => AUTOBAN_RULES, 'timeouts' => BLOCK_TIMEOUTS, 'staticLogged' => ($st['static'] ?? 0) > time() - 86400, 'last' => storeRead('autoban_last'), 'journal' => array_slice(autobanJournal(), -400),
           'admins' => storeRead('admins'), 'tracked' => count($st['ips'] ?? []), 'enabled' => blockEnabled(),
           'dataDir' => dataDir(), 'dataOk' => rtrim(DATA_DIR, '/') === dataDir(), 'user' => $user, 'script' => __FILE__,
           'php' => is_file($pv = PHP_BINDIR . '/php' . PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION) ? $pv : PHP_BINDIR . '/php', 'maxHour' => AUTOBAN_MAX_PER_HOUR, 'window' => AUTOBAN_WINDOW, 'skipBots' => AUTOBAN_SKIP_BOTS, 'now' => time()]);
@@ -889,9 +1030,19 @@ if ($api === 'autoban_set') {
     requireCsrf();
     $mode = (string)($_POST['mode'] ?? '');
     $rule = (string)($_POST['rule'] ?? '');
-    storeUpdate('autoban_settings', function ($s) use ($mode, $rule) {
+    $key = (string)($_POST['key'] ?? ''); $val = $_POST['val'] ?? null;
+    $def = AUTOBAN_RULES[$rule][$key] ?? null;
+    if ($key !== '' && (!is_numeric($val) || !(is_int($def) || is_float($def)))) json(['ok' => false, 'error' => 'Неверное значение']);
+    if ($key === 'timeout' && !isset(BLOCK_TIMEOUTS[(int)$val])) json(['ok' => false, 'error' => 'Неверный срок']);
+    storeUpdate('autoban_settings', function ($s) use ($mode, $rule, $key, $val, $def) {
         if (in_array($mode, ['off', 'watch', 'ban'], true)) $s['mode'] = $mode;
-        if (isset(AUTOBAN_RULES[$rule])) $s['rules'][$rule] = ($_POST['on'] ?? '') === '1';
+        if (!isset(AUTOBAN_RULES[$rule])) return $s;
+        if (isset($_POST['on'])) $s['rules'][$rule] = $_POST['on'] === '1';
+        if (isset($_POST['reset'])) unset($s['params'][$rule]);
+        if ($key !== '') {
+            $v = is_float($def) ? max(0.05, min(1.0, round((float)$val, 2))) : max(1, min(10_000_000, (int)$val));
+            if ($v == $def) unset($s['params'][$rule][$key]); else $s['params'][$rule][$key] = $v;
+        }
         return $s;
     });
     json(['ok' => true] + autobanSettings());
@@ -1101,6 +1252,8 @@ main{padding:14px 16px;max-width:1700px;margin:0 auto}
 .tabs button{border-radius:8px}.tabs button.on{background:var(--text);color:var(--panel);border-color:var(--text)}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}.seg button{border:0;border-radius:0;background:var(--panel2)}
 .seg button.on{background:var(--c);color:#fff;font-weight:700}
+input.abp{width:62px;padding:1px 4px;margin:0 2px;font:inherit;font-weight:700;text-align:center;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--text)}
+select.abp{padding:2px 4px}.abp.ch{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .tabs .cnt{display:inline-block;min-width:18px;padding:0 5px;margin-left:4px;border-radius:9px;background:var(--threat);color:#fff;font-size:11px;font-weight:700;text-align:center}
 .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
 .toolbar input[type=search]{flex:1;min-width:200px}
@@ -2305,8 +2458,13 @@ async function abRun() {
   else toast('Ошибка проверки', d.error || '', 'var(--s4)');
   await loadAutoban(); render(false, true);
 }
-function abDesc(r) {
-  return esc(r.desc).replace('{hits}', r.hits).replace('{per_min}', r.per_min).replace('{share_pct}', Math.round((r.share || 0) * 100)).replace('{bots}', esc((r.bots || []).join(', ')));
+function abChanged(k, key) { const a = st.ab.defaults?.[k]?.[key], b = st.ab.rules[k][key]; return a !== undefined && Math.abs(a - b) > 1e-9; }
+function abDesc(k, r) {
+  return esc(r.desc).replace(/\{(\w+)\}/g, (_, p) => {
+    if (p === 'bots') return esc((r.bots || []).join(', '));
+    const pct = p === 'share_pct', key = pct ? 'share' : p, v = pct ? Math.round((r.share || 0) * 100) : r[key], def = st.ab.defaults?.[k]?.[key];
+    return `<input type="number" class="abp${abChanged(k, key) ? ' ch' : ''}" data-abparam="${k}:${key}" ${pct ? 'data-pct="1" max="100"' : ''} min="1" value="${v}" title="Порог можно изменить. По умолчанию: ${pct ? Math.round(def * 100) : def}">`;
+  });
 }
 function renderAutoban() {
   const d = st.ab;
@@ -2338,12 +2496,13 @@ function renderAutoban() {
     <div class="card" style="--c:var(--s4);cursor:default"><div class="v">${nf(c('error') + c('limit'))}</div><div class="l">⚠️ Ошибки</div><div class="d">и срабатывания предохранителя</div></div>
     <div class="card" style="--c:${cronOk ? 'var(--s2)' : 'var(--s4)'};cursor:default"><div class="v">${cronOk ? '✓' : '—'}</div><div class="l">⏰ Cron</div><div class="d">${last.cron ? 'был ' + ago(last.cron) : 'не запускался'}</div></div>
   </div>
-  <div class="panel" style="margin:0 14px 14px"><h2>📏 Правила <span class="sub">окно анализа — ${Math.round(d.window / 60)} мин · не больше ${d.maxHour} банов в час · повторным нарушителям срок ×2</span></h2>
+  <div class="panel" style="margin:0 14px 14px"><h2>📏 Правила <span class="sub">${Object.values(d.rules).filter(r => r.on).length} из ${Object.keys(d.rules).length} включено · окно анализа — ${Math.round(d.window / 60)} мин · не больше ${d.maxHour} банов в час · повторным нарушителям срок ×2</span></h2>
     <table class="tbl"><thead><tr><th style="width:40px"></th><th>Правило</th><th>Когда срабатывает</th><th>Срок</th><th class="num">За 24 ч</th></tr></thead><tbody>${
       Object.entries(d.rules).map(([k, r]) => `<tr style="${r.on ? '' : 'opacity:.5'}"><td><input type="checkbox" data-abrule="${k}" ${r.on ? 'checked' : ''} title="Включить / выключить"></td>
-        <td><b>${esc(r.title)}</b></td><td class="sub">${abDesc(r)}</td><td>${dur(r.timeout)}</td><td class="num">${ruleHits[k] || 0}</td></tr>`).join('')
+        <td style="white-space:nowrap"><b>${esc(r.title)}</b>${Object.keys(d.defaults[k] || {}).some(key => key !== 'on' && typeof r[key] === 'number' && abChanged(k, key)) ? ` <button class="sm" data-abreset="${k}" title="Вернуть значения по умолчанию">↺</button>` : ''}</td><td class="sub">${abDesc(k, r)}${k === 'uarot' && !d.staticLogged ? ' <i>(в ваших логах нет картинок и стилей — порог удвоен)</i>' : ''}</td>
+        <td><select class="abp${abChanged(k, 'timeout') ? ' ch' : ''}" data-abparam="${k}:timeout" style="width:auto">${Object.entries(d.timeouts).map(([s, l]) => `<option value="${s}" ${+s === r.timeout ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></td><td class="num">${ruleHits[k] ? `<b>${ruleHits[k]}</b>` : 0}</td></tr>`).join('')
     }</tbody></table>
-    <p class="help" style="padding:0 14px">Никогда не блокируются: ваши IP (с которых открывали эту панель), локальные адреса, <code>BLOCK_PROTECT_IPS</code>, подтверждённые по rDNS Googlebot / YandexBot / Bingbot…, полезные боты (${esc(d.skipBots.join(', '))}). Пороги меняются в начале logs.php (<code>AUTOBAN_RULES</code>).</p>
+    <p class="help" style="padding:0 14px">Никогда не блокируются: ваши IP (с которых открывали эту панель), локальные адреса, <code>BLOCK_PROTECT_IPS</code>, подтверждённые по rDNS Googlebot / YandexBot / Bingbot…, полезные боты (${esc(d.skipBots.join(', '))}) — но только от правил «по количеству»: атаку, сканирование и подбор пароля чужой User-Agent не прикроет. Числа и сроки меняются прямо в таблице (изменённые подсвечены, ↺ — вернуть как было). Если сработало несколько правил, действует самое строгое.</p>
   </div>
   <div class="panel" style="margin:0 14px 14px"><h2>📒 Журнал решений
     <select id="abFilter" style="margin-left:8px"><option value="">все</option>${Object.entries(AB_ACT).map(([k, [l]]) => `<option value="${k}" ${flt === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -2423,6 +2582,7 @@ document.addEventListener('click', ev => {
   if (t.id === 'banIpBtn') { const v = $('#banIp').value.trim(); if (/^[0-9a-f.:]+(\/\d{1,3})?$/i.test(v) && v.length > 2) askBan(v); else toast('Неверный IP', v, 'var(--fake)'); return; }
   const abm = t.closest('[data-abmode]'); if (abm) { abSetMode(abm.dataset.abmode); return; }
   if (t.id === 'abRun') { abRun(); return; }
+  if (t.dataset.abreset) { abPost('autoban_set', {rule: t.dataset.abreset, reset: 1}).then(loadAutoban).then(() => render(false, true)); return; }
   if (t.id === 'copyCron') { navigator.clipboard?.writeText($('#cronCmd').textContent).then(() => toast('📋 Скопировано', 'Вставьте в терминал сервера', 'var(--accent)')); return; }
   if (t.id === 'fwReload') { loadFw(true).then(() => render(false, true)); return; }
   if (t.id === 'clearAll') { clearAll(); return; }
@@ -2493,9 +2653,15 @@ new ResizeObserver(() => document.documentElement.style.setProperty('--hdr', $('
 setInterval(() => { if (!st.paused) render(false, true); }, 30000);
 poll(); loadDiag(); loadBans().then(() => render(false, true));
 setInterval(() => loadBans().then(() => { if (st.tab === 'block') render(false, true); }), 60000);
-loadAutoban(); setInterval(() => loadAutoban().then(() => { if (st.tab === 'autoban') render(false, true); }), 30000);
+loadAutoban(); setInterval(() => loadAutoban().then(() => { if (st.tab === 'autoban' && !document.activeElement?.classList.contains('abp')) render(false, true); }), 30000);
 document.addEventListener('change', async ev => {
   if (ev.target.id === 'abFilter') { st.abFilter = ev.target.value; render(false, true); }
+  if (ev.target.dataset.abparam) {
+    const [rule, key] = ev.target.dataset.abparam.split(':'), raw = +ev.target.value;
+    const d = await abPost('autoban_set', {rule, key, val: ev.target.dataset.pct ? raw / 100 : raw});
+    if (d.ok) toast('📏 Правило изменено', st.ab.rules[rule].title + ' — действует со следующей проверки', 'var(--accent)'); else toast('Не сохранено', d.error || '', 'var(--s4)');
+    await loadAutoban(); render(false, true); return;
+  }
   if (ev.target.dataset.abrule) { await abPost('autoban_set', {rule: ev.target.dataset.abrule, on: ev.target.checked ? '1' : '0'}); await loadAutoban(); render(false, true); }
 });
 document.addEventListener('input', ev => { if (ev.target.id === 'fwq') { st.fwq = ev.target.value; const pos = ev.target.selectionStart; render(false, true); const el = $('#fwq'); if (el) { el.focus(); el.setSelectionRange(pos, pos); } } });
