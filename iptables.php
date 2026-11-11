@@ -1,7 +1,7 @@
 <?php
 /**
  * iptables.php - Управление блокировкой IP/CIDR через ipset
- * Версия: 3.3 (CIDR support)
+ * Версия: 3.4 (CIDR support; быстрый block: 1 sudo + дедуп повторов)
  *
  * Блокирует весь трафик от IP или подсети CIDR на уровне INPUT.
  * Сеты используют hash:net — поддерживают как одиночные IP, так и CIDR.
@@ -42,6 +42,8 @@ if (!defined('IPSET_V4'))      define('IPSET_V4',      'banlist4');
 if (!defined('IPSET_V6'))      define('IPSET_V6',      'banlist6');
 if (!defined('BAN_TIMEOUT'))   define('BAN_TIMEOUT',   3600);
 if (!defined('IPSET_MAXELEM')) define('IPSET_MAXELEM', 1000000);
+// Повторный бан того же IP раньше этого срока пропускается без вызова sudo (0 = выкл.)
+if (!defined('BLOCK_DEDUP_SEC')) define('BLOCK_DEDUP_SEC', 60);
 
 $API_KEY  = defined('API_BLOCK_KEY') ? API_BLOCK_KEY : 'default-key';
 $api_mode = isset($_REQUEST['api']) && $_REQUEST['api'] == 1;
@@ -275,28 +277,52 @@ function blockIP($input, $timeout = 0) {
     }
 
     $timeout = ($timeout > 0) ? (int)$timeout : BAN_TIMEOUT;
-    ensureSetsReady();
-
     $set = ($p['version'] === 4) ? IPSET_V4 : IPSET_V6;
 
-    // Проверка: если сет существующего типа hash:ip — CIDR не поддержится
-    if ($p['is_cidr']) {
-        $type = getSetType($set);
-        if ($type !== null && $type !== 'hash:net') {
+    // Дедупликация без sudo: при флуде nginx шлёт подзапрос на КАЖДЫЙ 429,
+    // а банить один и тот же IP достаточно один раз. Окно — BLOCK_DEDUP_SEC.
+    $lock = null;
+    if (!$p['is_cidr'] && BLOCK_DEDUP_SEC > 0) {
+        $lock = sys_get_temp_dir() . '/murkir_ban_' . md5($label);
+        $mt = @filemtime($lock);
+        if ($mt !== false && $mt > time() - BLOCK_DEDUP_SEC) {
             return array(
-                'status'  => 'error',
-                'message' => "Сет $set имеет тип $type и не поддерживает CIDR",
-                'details' => 'Откройте вкладку "Диагностика" и нажмите «Инициализировать» для миграции на hash:net',
+                'status'  => 'success',
+                'message' => "IP $label уже заблокирован (повтор пропущен)",
+                'details' => 'dedup ' . BLOCK_DEDUP_SEC . ' сек',
             );
         }
+        @touch($lock);
     }
 
     $cmd = sprintf("sudo ipset add %s %s timeout %d -exist 2>&1",
         $set, escapeshellarg($label), $timeout);
 
+    // Быстрый путь: один вызов sudo. Сеты/правила проверяем и создаём
+    // только если add не прошёл (после reboot сетов ещё нет).
     exec($cmd, $out, $rc);
 
     if ($rc !== 0) {
+        ensureSetsReady();
+
+        // Если сет старого типа hash:ip — CIDR не поддержится
+        if ($p['is_cidr']) {
+            $type = getSetType($set);
+            if ($type !== null && $type !== 'hash:net') {
+                return array(
+                    'status'  => 'error',
+                    'message' => "Сет $set имеет тип $type и не поддерживает CIDR",
+                    'details' => 'Откройте вкладку "Диагностика" и нажмите «Инициализировать» для миграции на hash:net',
+                );
+            }
+        }
+
+        $out = array();
+        exec($cmd, $out, $rc);
+    }
+
+    if ($rc !== 0) {
+        if ($lock) @unlink($lock); // чтобы следующий 429 попробовал снова
         return array('status' => 'error', 'message' => "Ошибка блокировки: $label", 'details' => implode("\n", $out));
     }
 
@@ -320,6 +346,8 @@ function unblockIP($input) {
     $cmd = sprintf("sudo ipset del %s %s 2>&1", $set, escapeshellarg($label));
 
     exec($cmd, $out, $rc);
+
+    @unlink(sys_get_temp_dir() . '/murkir_ban_' . md5($label)); // сброс дедупа
 
     if ($rc !== 0) {
         return array('status' => 'warning', 'message' => "$label не найден в списке или уже разблокирован");
@@ -622,6 +650,8 @@ function clearAllRules() {
     exec("sudo ipset flush " . IPSET_V6 . " 2>&1", $o6, $c6);
     $results[] = ($c6 === 0) ? IPSET_V6 . ' очищен' : 'Ошибка ' . IPSET_V6;
     if ($c6 !== 0) $ok = false;
+
+    foreach ((array)glob(sys_get_temp_dir() . '/murkir_ban_*') as $f) @unlink($f); // сброс дедупа
 
     return array(
         'status'  => $ok ? 'success' : 'warning',
