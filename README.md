@@ -1,5 +1,5 @@
 ## Щит MurKir — заблокированные IP
-Пример работы с блокировкой по ipset API
+Пример работы с блокировкой по ipset API с блокировкой в реальном времени с MurKir Shield.
 
 https://murkir.com/blocked-ips
 ## MurKir Shield.
