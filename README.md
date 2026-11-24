@@ -2,7 +2,8 @@
 Пример работы с блокировкой по ipset API
 
 https://murkir.com/blocked-ips
-## Живые логи nginx и автозащита от ботов в реальном времени на чистом PHP: без JS-проверок, без Composer, без Redis.
+## MurKir Shield.
+
 https://github.com/Murkirpus/murkir-shield
 
 <img src="./murkir-ipset-api.png" alt="Демонстрация" width="1000">
